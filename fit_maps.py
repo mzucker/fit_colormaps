@@ -146,7 +146,7 @@ def main():
     cols = int(np.ceil(n/rows))
 
     for i, key in enumerate(cmaps):
-        mapdata = np.genfromtxt(key + '.txt')
+        mapdata = np.genfromtxt('data/' + key + '.txt')
         plt.subplot(rows, cols, i+1)
         fit(key, mapdata)
 
