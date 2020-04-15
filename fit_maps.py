@@ -13,10 +13,15 @@ import numpy as np
 FitOptions = namedtuple('FitOptions',
                         'fit_type, degree, is_rational, clip_reconstruction')
 
-DEFAULT_OPTIONS = FitOptions(fit_type='poly',
-                             degree=4,
-                             is_rational=True,
-                             clip_reconstruction=1.0)
+PlotOptions = namedtuple('PlotOptions',
+                         'title, image_filename, domain, range, min_samples')
+
+DEFAULT_FIT_OPTIONS = FitOptions(fit_type='poly',
+                                 degree=4,
+                                 is_rational=True,
+                                 clip_reconstruction=1.0)
+
+DEFAULT_PLOT_OPTIONS = PlotOptions(title=None, image_filename=None, domain=(0., 1.), range=None, min_samples=256)
 
 ######################################################################
 
@@ -44,7 +49,16 @@ def initial_fit(x, y, fit_opts):
         p = np.polyfit(x, y, fit_opts.degree)
     else:
         A = get_fourier_matrix(x, fit_opts.degree)
-        p, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
+        if 0:
+            U, S, VT = np.linalg.svd(A, full_matrices=False)
+            Sinv = np.zeros_like(S)
+            mask = np.abs(S) > 1e-7
+            Sinv[mask] = 1/S[mask]
+            Sinv = np.diag(Sinv)
+            Ainv = np.dot(VT.T, np.dot(Sinv, U.T))
+            p = np.dot(Ainv, y)
+        else:
+            p, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
 
     if not fit_opts.is_rational:
         return p
@@ -140,10 +154,12 @@ def fit_single_channel(cidx, x, y, fit_opts):
         # polynomial or Fourier series, using output of step 1 as
         # initial guess.
         npts = len(x)
+        _, nparams = num_coeffs(fit_opts)
         guess, _ = scipy.optimize.curve_fit(curve_fit_f,
                                             x, y, guess,
-                                            maxfev=10000,
-                                            ftol=1e-5, xtol=1e-5)
+                                            ftol=1e-5,
+                                            xtol=1e-5,
+                                            method='dogbox')
 
     # step 3/3: local search to do minimax optimization, starting from
     # output of step 1 or 2. in my experience, gradient-based optimizers
@@ -174,7 +190,7 @@ def get_rtype(nchannels):
 def vecstr(v):
     fmt = '{:.16g}'
     if len(v) == 1:
-        return fmt.format(v)
+        return fmt.format(v[0])
     else:
         interior = ', '.join(fmt.format(vi) for vi in v)
         return get_rtype(len(v)) + '(' + interior + ')'
@@ -271,9 +287,12 @@ def fit(key, data, fit_opts):
     
     assert nchannels in range(1, 5)
     
-    x = np.linspace(0, 1, len(data), endpoint=False)
+    x = np.linspace(0, 1, npoints, endpoint=False)
 
-    print('fitting', key, file=sys.stderr)
+    _, nparams = num_coeffs(fit_opts)
+
+    print('fitting {}-parameter model to {} points in {}'.format(
+        nparams, npoints, key), file=sys.stderr)
 
     coeffs = []
 
@@ -324,20 +343,41 @@ def fit(key, data, fit_opts):
 
 ######################################################################
 
-def plot(key, data, coeffs, fit_opts):
+def plot(key, data, coeffs, fit_opts, plot_opts):
 
     npoints, nchannels = data.shape
 
     assert len(coeffs) == nchannels
         
-    
     chan_colors = np.array([
         [1, 0, 0],
         [0, 1, 0],
         [0, 0, 1],
         [.75, .75, .75]], dtype=float)
 
-    x = np.linspace(0, 1, len(data), endpoint=False)
+    x0, x1 = plot_opts.domain
+    xm = 0.05 * (x1 - x0)
+
+    if fit_opts.fit_type == 'fourier':
+        x = np.linspace(x0, x1, npoints+1, endpoint=True)
+        data = np.vstack((data, [data[0]]))
+    else:
+        x = np.linspace(x0, x1, npoints, endpoint=False)
+
+    if plot_opts.range is None:
+        y0 = np.floor(data.min())
+        y1 = np.ceil(data.max())
+    else:
+        y0, y1 = plot_opts.range
+
+    xfine = x
+    
+    if npoints < plot_opts.min_samples:
+        factor = int(np.ceil(plot_opts.min_samples / npoints))
+        xfine = np.linspace(x0, x1, npoints*factor+1, endpoint=True)
+        
+        
+    ym = 0.05 * (y1 - y0)
 
     max_err = 0
     
@@ -349,18 +389,30 @@ def plot(key, data, coeffs, fit_opts):
 
         px = reconstruct(p, x, fit_opts)
         max_err = max(max_err, np.abs(px - channel).max())
+
+        if xfine is not x:
+            pxfine = reconstruct(p, xfine, fit_opts)
+        else:
+            pxfine = px
+                             
         
         plt.plot(x, channel, color=color)
-        plt.plot(x, px, ':', color=0.5*color, linewidth=2)
+        plt.plot(xfine, pxfine, ':', color=0.5*color, linewidth=2)
+        
+    plt.xlim(x0-xm, x1+xm)
+    plt.ylim(y0-ym, y1+ym)
 
-        plt.ylim(-0.05, 1.05)
-
-    plt.text(1, 0, '{}: max err={:.3f}'.format(key, max_err),
+    plt.text(x1, 0, '{}: max err={:.3f}'.format(key, max_err),
              ha='right', va='bottom',
              path_effects=[
                  path_effects.Stroke(linewidth=8, foreground=[1, 1, 1, 0.8]),
                  path_effects.Normal()])
         
+
+######################################################################
+
+def fill_tuple(tclass, lookup):
+    return tclass(*[lookup[field] for field in tclass._fields])
 
 ######################################################################
 
@@ -374,33 +426,49 @@ def parse_cmdline():
 
     parser.add_argument('-t', dest='fit_type',
                         choices=['fourier', 'poly'],
-                        default=DEFAULT_OPTIONS.fit_type,
+                        default=DEFAULT_FIT_OPTIONS.fit_type,
                         help='type of fit')
 
     parser.add_argument('-d', dest='degree',
                         metavar='N',
-                        type=int, default=DEFAULT_OPTIONS.degree,
+                        type=int, default=DEFAULT_FIT_OPTIONS.degree,
                         help='degree of polynomial/fourier series')
     
     parser.add_argument('-c', dest='clip_reconstruction',
                         metavar='VALUE',
-                        type=float, default=DEFAULT_OPTIONS.clip_reconstruction,
+                        type=float, default=DEFAULT_FIT_OPTIONS.clip_reconstruction,
                         choices=[0, 1, 255],
                         help='clipping limit (0=disabled)')
 
     parser.add_argument('-T', dest='title',
                         metavar='TITLESTRING',
-                        default=None,
+                        default=DEFAULT_PLOT_OPTIONS.title,
                         help='title for plots')
 
-    assert DEFAULT_OPTIONS.is_rational
+    def domain_range(s):
+        x0, x1 = map(float, s.split(','))
+        return (x0, x1)
+    
+    parser.add_argument('-x', dest='domain',
+                        metavar='X0,X1', default=DEFAULT_PLOT_OPTIONS.domain,
+                        type=domain_range, help='domain for plotting')
+
+    parser.add_argument('-y', dest='range',
+                        metavar='Y0,Y1', default=DEFAULT_PLOT_OPTIONS.range,
+                        type=domain_range, help='range for plotting')
+    
+    parser.add_argument('-m', dest='min_samples',
+                        metavar='N', default=DEFAULT_PLOT_OPTIONS.min_samples,
+                        type=int, help='min number of points in domain for plotting')
+
+    assert DEFAULT_FIT_OPTIONS.is_rational
     
     parser.add_argument('-R', dest='is_rational',
                         action='store_false',
                         help='don\'t use rational approximation')
 
     parser.add_argument('-p', dest='image_filename',
-                        default=None,
+                        default=DEFAULT_PLOT_OPTIONS.image_filename,
                         help='image filename or - to suppress plotting')
 
     opts = parser.parse_args()
@@ -408,35 +476,31 @@ def parse_cmdline():
     mapfiles = opts.mapfiles
     del opts.mapfiles
 
-    title = opts.title
-    del opts.title
-
-    image_filename = opts.image_filename
-    del opts.image_filename
-
     if mapfiles == []:
         mapfiles = 'inferno magma plasma viridis turbo hsluv hpluv'.split()
-    
-    fit_opts = FitOptions(**vars(opts))
 
-    if title is None:
+    fit_opts = fill_tuple(FitOptions, vars(opts))
+
+    if opts.title is None:
         rlabel = 'rational ' if fit_opts.is_rational else ''
         if fit_opts.fit_type == 'poly':
-            title = 'Degree {} {}polynomial'.format(
+            opts.title = 'Degree {} {}polynomial'.format(
                 fit_opts.degree, rlabel)
         else:
-            title = 'Order {} {}Fourier series'.format(
+            opts.title = 'Order {} {}Fourier series'.format(
                 fit_opts.degree, rlabel)
         if fit_opts.clip_reconstruction:
-            title += ' clipped to [0,{:g}]'.format(fit_opts.clip_reconstruction)
+            opts.title += ' clipped to [0,{:g}]'.format(fit_opts.clip_reconstruction)
 
-    return mapfiles, fit_opts, title, image_filename
+    plot_opts = fill_tuple(PlotOptions, vars(opts))
+            
+    return mapfiles, fit_opts, plot_opts
 
 ######################################################################
 
 def main():
 
-    mapfiles, fit_opts, title, image_filename = parse_cmdline()
+    mapfiles, fit_opts, plot_opts = parse_cmdline()
 
     print('fit_opts =', fit_opts, file=sys.stderr)
     print(file=sys.stderr)
@@ -454,25 +518,27 @@ def main():
             filename = datafilename
         key, _ = os.path.splitext(os.path.basename(filename))
         mapdata = np.genfromtxt(filename)
+        if len(mapdata.shape) == 1:
+            mapdata = mapdata.reshape(-1, 1)
         coeffs = fit(key, mapdata, fit_opts)
         results.append((key, mapdata, coeffs))
 
-    if image_filename == '-':
+    if plot_opts.image_filename == '-':
         return
 
     plt.figure(figsize=(8, 4.5))
 
-    plt.suptitle(title)
+    plt.suptitle(plot_opts.title)
 
     for i, (key, mapdata, coeffs) in enumerate(results):
         plt.subplot(rows, cols, i+1)
-        plot(key, mapdata, coeffs, fit_opts)
+        plot(key, mapdata, coeffs, fit_opts, plot_opts)
 
-    if image_filename is None:
+    if plot_opts.image_filename is None:
         plt.show()
     else:
-        plt.savefig(image_filename, dpi=144)
-        print('wrote', image_filename, file=sys.stderr)
+        plt.savefig(plot_opts.image_filename, dpi=144)
+        print('wrote', plot_opts.image_filename, file=sys.stderr)
 
 ######################################################################
     
