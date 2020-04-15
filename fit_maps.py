@@ -21,7 +21,11 @@ DEFAULT_FIT_OPTIONS = FitOptions(fit_type='poly',
                                  is_rational=True,
                                  clip_reconstruction=1.0)
 
-DEFAULT_PLOT_OPTIONS = PlotOptions(title=None, image_filename=None, domain=(0., 1.), range=None, min_samples=256)
+DEFAULT_PLOT_OPTIONS = PlotOptions(title=None,
+                                   image_filename=None,
+                                   domain=(0., 1.),
+                                   range=None,
+                                   min_samples=256)
 
 ######################################################################
 
@@ -416,6 +420,12 @@ def fill_tuple(tclass, lookup):
 
 ######################################################################
 
+def domain_range(s):
+    x0, x1 = map(float, s.split(','))
+    return (x0, x1)
+
+######################################################################
+
 def parse_cmdline():
 
     parser = argparse.ArgumentParser('minimax polynomial fitting of colormaps')
@@ -440,14 +450,20 @@ def parse_cmdline():
                         choices=[0, 1, 255],
                         help='clipping limit (0=disabled)')
 
+    assert DEFAULT_FIT_OPTIONS.is_rational
+    
+    parser.add_argument('-R', dest='is_rational',
+                        action='store_false',
+                        help='don\'t use rational approximation')
+        
     parser.add_argument('-T', dest='title',
                         metavar='TITLESTRING',
                         default=DEFAULT_PLOT_OPTIONS.title,
                         help='title for plots')
 
-    def domain_range(s):
-        x0, x1 = map(float, s.split(','))
-        return (x0, x1)
+    parser.add_argument('-p', dest='image_filename',
+                        default=DEFAULT_PLOT_OPTIONS.image_filename,
+                        help='image filename or - to suppress plotting')
     
     parser.add_argument('-x', dest='domain',
                         metavar='X0,X1', default=DEFAULT_PLOT_OPTIONS.domain,
@@ -461,15 +477,6 @@ def parse_cmdline():
                         metavar='N', default=DEFAULT_PLOT_OPTIONS.min_samples,
                         type=int, help='min number of points in domain for plotting')
 
-    assert DEFAULT_FIT_OPTIONS.is_rational
-    
-    parser.add_argument('-R', dest='is_rational',
-                        action='store_false',
-                        help='don\'t use rational approximation')
-
-    parser.add_argument('-p', dest='image_filename',
-                        default=DEFAULT_PLOT_OPTIONS.image_filename,
-                        help='image filename or - to suppress plotting')
 
     opts = parser.parse_args()
 
@@ -490,7 +497,8 @@ def parse_cmdline():
             opts.title = 'Order {} {}Fourier series'.format(
                 fit_opts.degree, rlabel)
         if fit_opts.clip_reconstruction:
-            opts.title += ' clipped to [0,{:g}]'.format(fit_opts.clip_reconstruction)
+            opts.title += ' clipped to [0,{:g}]'.format(
+                fit_opts.clip_reconstruction)
 
     plot_opts = fill_tuple(PlotOptions, vars(opts))
             
