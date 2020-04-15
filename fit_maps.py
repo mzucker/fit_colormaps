@@ -462,10 +462,10 @@ def main():
 
     plt.figure(figsize=(8, 4.5))
 
+    plt.suptitle(title)
+
     for i, (key, mapdata, coeffs) in enumerate(results):
         plt.subplot(rows, cols, i+1)
-        if i == 0:
-            plt.title(title)
         plot(key, mapdata, coeffs, fit_opts)
 
     if image_filename is None:
