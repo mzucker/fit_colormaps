@@ -129,16 +129,26 @@ def fit_single_channel(cidx, x, y, fit_opts):
         e = err(p)
         return np.sqrt(np.dot(e, e)/len(e))
 
+    # step 1/3: global least-squares fit to regular (not rational)
+    # polynomial or Fourier series - for rational versions just
+    # initializes denominator to the constant function f(x) = 1
     p0 = initial_fit(x, y, fit_opts)
     guess = p0
 
     if fit_opts.is_rational:
+        # step 2/3: local search to do least-squares fit for rational
+        # polynomial or Fourier series, using output of step 1 as
+        # initial guess.
         npts = len(x)
         guess, _ = scipy.optimize.curve_fit(curve_fit_f,
                                             x, y, guess,
                                             maxfev=10000,
                                             ftol=1e-5, xtol=1e-5)
 
+    # step 3/3: local search to do minimax optimization, starting from
+    # output of step 1 or 2. in my experience, gradient-based optimizers
+    # don't do so hot minimizing maximum error (infinity norm), so using
+    # a derivative-free optimizer like nelder mead is safest.
     res = scipy.optimize.minimize(l1err, guess, method='Nelder-Mead')
     p1 = res.x
 
