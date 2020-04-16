@@ -12,7 +12,7 @@ from matplotlib.patches import Polygon
 import numpy as np
 
 FitOptions = namedtuple('FitOptions',
-                        'fit_type, degree, is_rational, clip_reconstruction')
+                        'fit_type, degree, is_rational, clip_reconstruction, loss')
 
 OutputOptions = namedtuple('OutputOptions',
                            'console_file, glsl_file, '
@@ -22,7 +22,8 @@ OutputOptions = namedtuple('OutputOptions',
 DEFAULT_FIT_OPTIONS = FitOptions(fit_type='poly',
                                  degree=4,
                                  is_rational=True,
-                                 clip_reconstruction=None)
+                                 clip_reconstruction=None,
+                                 loss='minimax')
 
 DEFAULT_OUTPUT_OPTIONS = OutputOptions(console_file=None,
                                        glsl_file=None,
@@ -32,6 +33,8 @@ DEFAULT_OUTPUT_OPTIONS = OutputOptions(console_file=None,
                                        range=None,
                                        plot_shape=False,
                                        min_samples=256)
+
+LOSS_NAMES = dict(rmse='RMSE', minimax='max error')
 
 ######################################################################
 
@@ -126,55 +129,96 @@ def reconstruct(p, basis, fit_opts):
         return np.clip(y, *fit_opts.clip_reconstruction)
     else:
         return y
-        
+
+######################################################################
+
+def loss(p, basis, y, fit_opts):
+
+    e = y - reconstruct(p, basis, fit_opts)
+    
+    if fit_opts.loss == 'rmse':
+        return np.sqrt(np.dot(e, e)/len(e))
+    else:
+        return np.abs(e).max()
+    
 ######################################################################    
     
 def fit_single_channel(cidx, x, basis, y, fit_opts, output_opts):
 
-    def curve_fit_f(x, *p):
+    def curve_fit_func(x, *p):
         return reconstruct(np.array(p), basis, fit_opts)
 
-    def err(p):
-        return y - reconstruct(p, basis, fit_opts)
+    def loss_func(p):
+        return loss(p, basis, y, fit_opts)
+
+    loss_name = LOSS_NAMES[fit_opts.loss]
     
-    def l1err(p):
-        e = err(p)
-        return np.abs(e).max()
-
-    def rmse(p):
-        e = err(p)
-        return np.sqrt(np.dot(e, e)/len(e))
-
     # step 1/3: global least-squares fit to regular (not rational)
     # polynomial or Fourier series - for rational versions just
     # initializes denominator to the constant function f(x) = 1
     p0 = initial_fit(basis, y, fit_opts)
-    guess = p0
 
-    if fit_opts.is_rational:
-        # step 2/3: local search to do least-squares fit for rational
-        # polynomial or Fourier series, using output of step 1 as
-        # initial guess.
-        npts = len(x)
-        _, nparams = num_coeffs(fit_opts)
-        guess, _ = scipy.optimize.curve_fit(curve_fit_f,
-                                            x, y, guess,
-                                            ftol=1e-5,
-                                            xtol=1e-5,
-                                            method='dogbox')
-
-    # step 3/3: local search to do minimax optimization, starting from
-    # output of step 1 or 2. in my experience, gradient-based optimizers
-    # don't do so hot minimizing maximum error (infinity norm), so using
-    # a derivative-free optimizer like nelder mead is safest.
-    res = scipy.optimize.minimize(l1err, guess, method='Nelder-Mead')
-    p1 = res.x
-
-    e0 = l1err(p0)
-    e1 = l1err(p1)
+    e0 = loss_func(p0)
     
-    print('  - channel {} max error: {:.7f} -> {:.7f} ({:.2f}%)'.format(
-        cidx, e0, e1, 100.0*e1/e0), file=output_opts.console_file)
+
+    if fit_opts.loss == 'rmse' and not fit_opts.is_rational:
+        
+        max_iter = 0
+        
+    elif not fit_opts.is_rational:
+
+        max_iter = 1
+
+    else:
+
+        max_iter = 20
+
+    best_p1 = p0
+    best_e1 = e0
+
+    for j in range(max_iter):
+
+        p1 = p0.copy()
+
+        if j > 0:
+            p1 += np.random.normal(size=p0.shape,
+                                   scale=0.5*np.abs(p0))
+
+        if fit_opts.is_rational:
+            # step 2/3: local search to do least-squares fit for rational
+            # polynomial or Fourier series, using output of step 1 as
+            # initial guess.
+            npts = len(x)
+            _, nparams = num_coeffs(fit_opts)
+            p1, _ = scipy.optimize.curve_fit(curve_fit_func,
+                                             x, y, p1,
+                                             ftol=1e-5,
+                                             xtol=1e-5,
+                                             method='dogbox')
+
+        if fit_opts.loss == 'minimax':
+            # step 3/3: local search to do minimax optimization, starting from
+            # output of step 1 or 2. in my experience, gradient-based optimizers
+            # don't do so hot minimizing maximum error (infinity norm), so using
+            # a derivative-free optimizer like nelder mead is safest.
+            res = scipy.optimize.minimize(loss_func, p1, method='Nelder-Mead')
+            p1 = res.x
+
+        e1 = loss_func(p1)
+
+        improved = (e1 < best_e1)
+
+        print('    at iter {} e1 is {}{}'.format(j+1, e1, '*'*int(improved)))
+
+        if improved:
+            best_e1 = e1
+            best_p1 = p1
+
+    p1 = best_p1
+    e1 = best_e1
+    
+    print('  - channel {} {}: {:.7f} -> {:.7f} ({:.2f}%)'.format(
+        cidx, loss_name, e0, e1, 100.0*e1/e0), file=output_opts.console_file)
     
     return p1
 
@@ -397,6 +441,7 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
     max_err = 0
 
     reconstructions = []
+    losses = []
 
     regular_data = (nchannels != 2 or not output_opts.plot_shape)
 
@@ -407,7 +452,7 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
         channel = data[:, cidx]
 
         px = reconstruct(p, basis, fit_opts)
-        max_err = max(max_err, np.abs(px - channel).max())
+        losses.append(loss(p, basis, channel, fit_opts))
 
         if x_fine is not x:
             px_fine = reconstruct(p, basis_fine, fit_opts)
@@ -443,7 +488,11 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
         va = 'bottom'
         effects=None
 
-    plt.text(tx, ty, '{}: max err={:.3g}'.format(key, max_err),
+    loss_name = LOSS_NAMES[fit_opts.loss]
+    losses = np.array(losses)
+
+    plt.text(tx, ty, '{}: avg. chan. {}={:.3g}'.format(
+        key, loss_name, losses.mean()),
              ha=ha, va=va, path_effects=effects)
 
 ######################################################################    
@@ -509,6 +558,11 @@ def parse_cmdline():
                         type=domain_range,
                         default=DEFAULT_FIT_OPTIONS.clip_reconstruction,
                         help='data clipping limits (default: none)')
+
+    parser.add_argument('-l', dest='loss',
+                        choices=('minimax', 'rmse'),
+                        default=DEFAULT_FIT_OPTIONS.loss,
+                        help='loss function')
 
     assert DEFAULT_FIT_OPTIONS.is_rational
     
