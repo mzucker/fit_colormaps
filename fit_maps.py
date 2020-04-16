@@ -51,24 +51,14 @@ def num_coeffs(fit_opts):
 
 ######################################################################
     
-def initial_fit(x, y, fit_opts):
+def initial_fit(x, y, fit_opts, A=None):
 
     assert fit_opts.fit_type in ['poly', 'fourier']
     
     if fit_opts.fit_type == 'poly':
         p = np.polyfit(x, y, fit_opts.degree)
     else:
-        A = get_fourier_matrix(x, fit_opts.degree)
-        if 0:
-            U, S, VT = np.linalg.svd(A, full_matrices=False)
-            Sinv = np.zeros_like(S)
-            mask = np.abs(S) > 1e-7
-            Sinv[mask] = 1/S[mask]
-            Sinv = np.diag(Sinv)
-            Ainv = np.dot(VT.T, np.dot(Sinv, U.T))
-            p = np.dot(Ainv, y)
-        else:
-            p, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
+        p, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
 
     if not fit_opts.is_rational:
         return p
@@ -93,14 +83,13 @@ def get_fourier_matrix(x, degree):
 
 ######################################################################
 
-def reconstruct_base(p, x, fit_opts):
+def reconstruct_base(p, x, fit_opts, A=None):
 
     assert fit_opts.fit_type in ['poly', 'fourier']
 
     if fit_opts.fit_type == 'poly':
         return np.polyval(p, x)
     else:
-        A = get_fourier_matrix(x, fit_opts.degree)
         return np.dot(A, p)
 
 ######################################################################
@@ -117,15 +106,15 @@ def split_params(p, fit_opts):
 
 ######################################################################
 
-def reconstruct(p, x, fit_opts):
+def reconstruct(p, x, fit_opts, A=None):
 
     if fit_opts.is_rational:
         p_num, p_denom = split_params(p, fit_opts)
-        rnum = reconstruct_base(p_num, x, fit_opts)
-        rdenom = reconstruct_base(p_denom, x, fit_opts)
+        rnum = reconstruct_base(p_num, x, fit_opts, A)
+        rdenom = reconstruct_base(p_denom, x, fit_opts, A)
         y = rnum / rdenom
     else:
-        y = reconstruct_base(p, x, fit_opts)
+        y = reconstruct_base(p, x, fit_opts, A)
 
     if fit_opts.clip_reconstruction is not None:
         return np.clip(y, *fit_opts.clip_reconstruction)
@@ -134,16 +123,13 @@ def reconstruct(p, x, fit_opts):
         
 ######################################################################    
     
-def fit_single_channel(cidx, x, y, fit_opts, output_opts):
+def fit_single_channel(cidx, x, y, A, fit_opts, output_opts):
 
     def curve_fit_f(x, *p):
-        return reconstruct(np.array(p), x, fit_opts) 
-
-    def least_squares_f(p):
-        return residual(p, x, y)
+        return reconstruct(np.array(p), x, fit_opts, A) 
 
     def err(p):
-        return y - reconstruct(p, x, fit_opts)
+        return y - reconstruct(p, x, fit_opts, A)
     
     def l1err(p):
         e = err(p)
@@ -156,7 +142,7 @@ def fit_single_channel(cidx, x, y, fit_opts, output_opts):
     # step 1/3: global least-squares fit to regular (not rational)
     # polynomial or Fourier series - for rational versions just
     # initializes denominator to the constant function f(x) = 1
-    p0 = initial_fit(x, y, fit_opts)
+    p0 = initial_fit(x, y, fit_opts, A)
     guess = p0
 
     if fit_opts.is_rational:
@@ -348,11 +334,16 @@ def fit(key, data, fit_opts, output_opts):
     print('Fitting {}-parameter model to {} points in {}...'.format(
         nparams, npoints, key), file=output_opts.console_file)
 
+    if fit_opts.fit_type == 'fourier':
+        A = get_fourier_matrix(x, fit_opts.degree)
+    else:
+        A = None
+
     coeffs = []
 
     for cidx in range(nchannels):
         channel = data[:, cidx]
-        p = fit_single_channel(cidx, x, channel, fit_opts, output_opts)
+        p = fit_single_channel(cidx, x, channel, A, fit_opts, output_opts)
         coeffs.append(p)
 
     print(file=output_opts.console_file)
@@ -393,6 +384,13 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
     if npoints < output_opts.min_samples:
         factor = int(np.ceil(output_opts.min_samples / npoints))
         xfine = np.linspace(x0, x1, npoints*factor+1, endpoint=True)
+
+    if fit_opts.fit_type == 'fourier':
+        A = get_fourier_matrix(x, fit_opts.degree)
+        Afine = get_fourier_matrix(xfine, fit_opts.degree)
+    else:
+        A = None
+        Afine = None
         
     ym = 0.05 * (y1 - y0)
 
@@ -408,11 +406,11 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
         
         channel = data[:, cidx]
 
-        px = reconstruct(p, x, fit_opts)
+        px = reconstruct(p, x, fit_opts, A)
         max_err = max(max_err, np.abs(px - channel).max())
 
         if xfine is not x:
-            pxfine = reconstruct(p, xfine, fit_opts)
+            pxfine = reconstruct(p, xfine, fit_opts, Afine)
         else:
             pxfine = px
 
@@ -440,11 +438,10 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
         plt.plot(reconstructions[0]+xshift, reconstructions[1], 'b-', linewidth=0.5)
         plt.axis('equal')
         plt.axis('off')
-        tx, ty = y0-xshift, y0-0.05*(y1 - y0)
+        tx, ty = y0-xshift, y0
         ha = 'left'
-        va = 'top'
+        va = 'bottom'
         effects=None
-        
 
     plt.text(tx, ty, '{}: max err={:.3f}'.format(key, max_err),
              ha=ha, va=va, path_effects=effects)
