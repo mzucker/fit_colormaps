@@ -13,19 +13,23 @@ import numpy as np
 FitOptions = namedtuple('FitOptions',
                         'fit_type, degree, is_rational, clip_reconstruction')
 
-PlotOptions = namedtuple('PlotOptions',
-                         'title, image_filename, domain, range, min_samples')
+OutputOptions = namedtuple('OutputOptions',
+                           'console_file, glsl_file, '
+                           'plot_title, image_filename, '
+                           'domain, range, min_samples')
 
 DEFAULT_FIT_OPTIONS = FitOptions(fit_type='poly',
                                  degree=4,
                                  is_rational=True,
-                                 clip_reconstruction=1.0)
+                                 clip_reconstruction=None)
 
-DEFAULT_PLOT_OPTIONS = PlotOptions(title=None,
-                                   image_filename=None,
-                                   domain=(0., 1.),
-                                   range=None,
-                                   min_samples=256)
+DEFAULT_OUTPUT_OPTIONS = OutputOptions(console_file=None,
+                                       glsl_file=None,
+                                       plot_title=None,
+                                       image_filename=None,
+                                       domain=(0., 1.),
+                                       range=None,
+                                       min_samples=256)
 
 ######################################################################
 
@@ -121,14 +125,14 @@ def reconstruct(p, x, fit_opts):
     else:
         y = reconstruct_base(p, x, fit_opts)
 
-    if fit_opts.clip_reconstruction:
-        return np.clip(y, 0, fit_opts.clip_reconstruction)
+    if fit_opts.clip_reconstruction is not None:
+        return np.clip(y, *fit_opts.clip_reconstruction)
     else:
         return y
         
 ######################################################################    
     
-def fit_single_channel(cidx, x, y, fit_opts):
+def fit_single_channel(cidx, x, y, fit_opts, output_opts):
 
     def curve_fit_f(x, *p):
         return reconstruct(np.array(p), x, fit_opts) 
@@ -175,8 +179,8 @@ def fit_single_channel(cidx, x, y, fit_opts):
     e0 = l1err(p0)
     e1 = l1err(p1)
     
-    print('channel {} max error: {:.7f} -> {:.7f} ({:.2f}%)'.format(
-        cidx, e0, e1, 100.0*e1/e0), file=sys.stderr)
+    print('  - channel {} max error: {:.7f} -> {:.7f} ({:.2f}%)'.format(
+        cidx, e0, e1, 100.0*e1/e0), file=output_opts.console_file)
     
     return p1
 
@@ -201,7 +205,7 @@ def vecstr(v):
     
 ######################################################################
 
-def glslify(p, fit_opts, prefix):
+def glslify_base(p, fit_opts, prefix):
 
     assert fit_opts.fit_type in ['poly', 'fourier']
 
@@ -285,36 +289,10 @@ def glslify(p, fit_opts, prefix):
 
 ######################################################################
 
-def fit(key, data, fit_opts):
+def glslify_single(key, coeffs, fit_opts, output_opts):
 
-    npoints, nchannels = data.shape
-    
-    assert nchannels in range(1, 5)
-    
-    x = np.linspace(0, 1, npoints, endpoint=False)
+    nchannels = coeffs.shape[1]
 
-    _, nparams = num_coeffs(fit_opts)
-
-    print('fitting {}-parameter model to {} points in {}'.format(
-        nparams, npoints, key), file=sys.stderr)
-
-    coeffs = []
-
-    for cidx in range(nchannels):
-        channel = data[:, cidx]
-        p = fit_single_channel(cidx, x, channel, fit_opts)
-        coeffs.append(p)
-
-    print(file=sys.stderr)
-
-    ##################################################
-    # GLSL output time
-
-    nbase, ntotal = num_coeffs(fit_opts)
-
-    coeffs = np.array(coeffs)
-    assert coeffs.shape == (nchannels, ntotal)
-    
     function = '{} {}(float t) {{\n\n'.format(get_rtype(nchannels), key)
 
     if fit_opts.fit_type == 'fourier':
@@ -330,24 +308,58 @@ def fit(key, data, fit_opts):
 
     if fit_opts.is_rational:
         p_num, p_denom = split_params(coeffs.T, fit_opts)
-        function += glslify(p_num, fit_opts, 'n')
-        function += glslify(p_denom, fit_opts, 'd')
+        function += glslify_base(p_num, fit_opts, 'n')
+        function += glslify_base(p_denom, fit_opts, 'd')
         if fit_opts.fit_type == 'fourier':
             function += '    return n/d;\n\n'
         else:
             function += '    return num/denom;\n\n'
     else:
-        function += glslify(coeffs.T, fit_opts, 'p')
+        function += glslify_base(coeffs.T, fit_opts, 'p')
             
     function += '}\n'
 
-    print(function)
-
-    return coeffs
+    print(function, file=output_opts.glsl_file)
 
 ######################################################################
 
-def plot(key, data, coeffs, fit_opts, plot_opts):
+def glslify(results, fit_opts, output_opts):
+
+    if output_opts.glsl_file is None:
+        return
+    
+    for key, _, coeffs in results:
+        glslify_single(key, coeffs, fit_opts, output_opts)
+    
+######################################################################
+
+def fit(key, data, fit_opts, output_opts):
+
+    npoints, nchannels = data.shape
+    
+    assert nchannels in range(1, 5)
+    
+    x = np.linspace(0, 1, npoints, endpoint=False)
+
+    _, nparams = num_coeffs(fit_opts)
+
+    print('Fitting {}-parameter model to {} points in {}...'.format(
+        nparams, npoints, key), file=output_opts.console_file)
+
+    coeffs = []
+
+    for cidx in range(nchannels):
+        channel = data[:, cidx]
+        p = fit_single_channel(cidx, x, channel, fit_opts, output_opts)
+        coeffs.append(p)
+
+    print(file=output_opts.console_file)
+
+    return np.array(coeffs)
+
+######################################################################
+
+def plot_single(key, data, coeffs, fit_opts, output_opts):
 
     npoints, nchannels = data.shape
 
@@ -359,7 +371,7 @@ def plot(key, data, coeffs, fit_opts, plot_opts):
         [0, 0, 1],
         [.75, .75, .75]], dtype=float)
 
-    x0, x1 = plot_opts.domain
+    x0, x1 = output_opts.domain
     xm = 0.05 * (x1 - x0)
 
     if fit_opts.fit_type == 'fourier':
@@ -368,18 +380,17 @@ def plot(key, data, coeffs, fit_opts, plot_opts):
     else:
         x = np.linspace(x0, x1, npoints, endpoint=False)
 
-    if plot_opts.range is None:
+    if output_opts.range is None:
         y0 = np.floor(data.min())
         y1 = np.ceil(data.max())
     else:
-        y0, y1 = plot_opts.range
+        y0, y1 = output_opts.range
 
     xfine = x
     
-    if npoints < plot_opts.min_samples:
-        factor = int(np.ceil(plot_opts.min_samples / npoints))
+    if npoints < output_opts.min_samples:
+        factor = int(np.ceil(output_opts.min_samples / npoints))
         xfine = np.linspace(x0, x1, npoints*factor+1, endpoint=True)
-        
         
     ym = 0.05 * (y1 - y0)
 
@@ -406,12 +417,38 @@ def plot(key, data, coeffs, fit_opts, plot_opts):
     plt.xlim(x0-xm, x1+xm)
     plt.ylim(y0-ym, y1+ym)
 
-    plt.text(x1, 0, '{}: max err={:.3f}'.format(key, max_err),
+    plt.text(x1, y0, '{}: max err={:.3f}'.format(key, max_err),
              ha='right', va='bottom',
              path_effects=[
                  path_effects.Stroke(linewidth=8, foreground=[1, 1, 1, 0.8]),
                  path_effects.Normal()])
+
+######################################################################    
         
+def plot(results, fit_opts, output_opts):
+
+    if output_opts.image_filename == '-':
+        return
+
+    n = len(results)
+
+    rows = int(np.ceil(np.sqrt(n)))
+    cols = int(np.ceil(n/rows))
+    
+    plt.figure(figsize=(8, 4.5))
+    
+    plt.suptitle(output_opts.plot_title)
+
+    for i, (key, mapdata, coeffs) in enumerate(results):
+        plt.subplot(rows, cols, i+1)
+        plot_single(key, mapdata, coeffs, fit_opts, output_opts)
+
+    if output_opts.image_filename is None:
+        plt.show()
+    else:
+        plt.savefig(output_opts.image_filename, dpi=144)
+        print('wrote', output_opts.image_filename,
+              file=output_opts.console_file)
 
 ######################################################################
 
@@ -445,10 +482,10 @@ def parse_cmdline():
                         help='degree of polynomial/fourier series')
     
     parser.add_argument('-c', dest='clip_reconstruction',
-                        metavar='VALUE',
-                        type=float, default=DEFAULT_FIT_OPTIONS.clip_reconstruction,
-                        choices=[0, 1, 255],
-                        help='clipping limit (0=disabled)')
+                        metavar='Y0,Y1',
+                        type=domain_range,
+                        default=DEFAULT_FIT_OPTIONS.clip_reconstruction,
+                        help='data clipping limits (default: none)')
 
     assert DEFAULT_FIT_OPTIONS.is_rational
     
@@ -456,26 +493,36 @@ def parse_cmdline():
                         action='store_false',
                         help='don\'t use rational approximation')
         
-    parser.add_argument('-T', dest='title',
+    parser.add_argument('-g', dest='glsl_filename',
+                        metavar='FILENAME.glsl',
+                        default=None,
+                        help='GLSL output file name')
+
+    parser.add_argument('-q', dest='quiet',
+                        action='store_true',
+                        help='no console output')
+    
+    parser.add_argument('-T', dest='plot_title',
                         metavar='TITLESTRING',
-                        default=DEFAULT_PLOT_OPTIONS.title,
+                        default=DEFAULT_OUTPUT_OPTIONS.plot_title,
                         help='title for plots')
 
     parser.add_argument('-p', dest='image_filename',
-                        default=DEFAULT_PLOT_OPTIONS.image_filename,
+                        default=DEFAULT_OUTPUT_OPTIONS.image_filename,
                         help='image filename or - to suppress plotting')
     
     parser.add_argument('-x', dest='domain',
-                        metavar='X0,X1', default=DEFAULT_PLOT_OPTIONS.domain,
+                        metavar='X0,X1', default=DEFAULT_OUTPUT_OPTIONS.domain,
                         type=domain_range, help='domain for plotting')
 
     parser.add_argument('-y', dest='range',
-                        metavar='Y0,Y1', default=DEFAULT_PLOT_OPTIONS.range,
+                        metavar='Y0,Y1', default=DEFAULT_OUTPUT_OPTIONS.range,
                         type=domain_range, help='range for plotting')
     
     parser.add_argument('-m', dest='min_samples',
-                        metavar='N', default=DEFAULT_PLOT_OPTIONS.min_samples,
+                        metavar='N', default=DEFAULT_OUTPUT_OPTIONS.min_samples,
                         type=int, help='min number of points in domain for plotting')
+
 
 
     opts = parser.parse_args()
@@ -488,35 +535,46 @@ def parse_cmdline():
 
     fit_opts = fill_tuple(FitOptions, vars(opts))
 
-    if opts.title is None:
+    if opts.plot_title is None:
         rlabel = 'rational ' if fit_opts.is_rational else ''
         if fit_opts.fit_type == 'poly':
-            opts.title = 'Degree {} {}polynomial'.format(
+            opts.plot_title = 'Degree {} {}polynomial'.format(
                 fit_opts.degree, rlabel)
         else:
-            opts.title = 'Order {} {}Fourier series'.format(
+            opts.plot_title = 'Order {} {}Fourier series'.format(
                 fit_opts.degree, rlabel)
-        if fit_opts.clip_reconstruction:
-            opts.title += ' clipped to [0,{:g}]'.format(
-                fit_opts.clip_reconstruction)
+        if fit_opts.clip_reconstruction is not None:
+            opts.plot_title += ' clipped to [{:g},{:g}]'.format(
+                *fit_opts.clip_reconstruction)
 
-    plot_opts = fill_tuple(PlotOptions, vars(opts))
+    opts.console_file = sys.stdout
             
-    return mapfiles, fit_opts, plot_opts
+    if opts.glsl_filename is None:
+        opts.glsl_file = None
+    elif opts.glsl_filename == '-':
+        opts.glsl_file = sys.stdout
+        opts.console_file = sys.stderr
+    else:
+        opts.glsl_file = open(opts.glsl_filename, 'w')
+
+    if opts.quiet:
+        opts.console_file = open(os.devnull, 'w')
+        
+    output_opts = fill_tuple(OutputOptions, vars(opts))
+            
+    return mapfiles, fit_opts, output_opts
 
 ######################################################################
 
 def main():
 
-    mapfiles, fit_opts, plot_opts = parse_cmdline()
+    mapfiles, fit_opts, output_opts = parse_cmdline()
 
-    print('fit_opts =', fit_opts, file=sys.stderr)
-    print(file=sys.stderr)
-
-    n = len(mapfiles)
-
-    rows = int(np.ceil(np.sqrt(n)))
-    cols = int(np.ceil(n/rows))
+    print('Fit options:\n', file=output_opts.console_file)
+    for key, val in fit_opts._asdict().items():
+        print('  {:20} {}'.format(key+':', val),
+              file=output_opts.console_file)
+    print(file=output_opts.console_file)
 
     results = []
     
@@ -528,25 +586,13 @@ def main():
         mapdata = np.genfromtxt(filename)
         if len(mapdata.shape) == 1:
             mapdata = mapdata.reshape(-1, 1)
-        coeffs = fit(key, mapdata, fit_opts)
+        coeffs = fit(key, mapdata, fit_opts, output_opts)
         results.append((key, mapdata, coeffs))
 
-    if plot_opts.image_filename == '-':
-        return
+    glslify(results, fit_opts, output_opts)
 
-    plt.figure(figsize=(8, 4.5))
-
-    plt.suptitle(plot_opts.title)
-
-    for i, (key, mapdata, coeffs) in enumerate(results):
-        plt.subplot(rows, cols, i+1)
-        plot(key, mapdata, coeffs, fit_opts, plot_opts)
-
-    if plot_opts.image_filename is None:
-        plt.show()
-    else:
-        plt.savefig(plot_opts.image_filename, dpi=144)
-        print('wrote', plot_opts.image_filename, file=sys.stderr)
+    plot(results, fit_opts, output_opts)
+    
 
 ######################################################################
     
