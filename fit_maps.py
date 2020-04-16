@@ -51,14 +51,14 @@ def num_coeffs(fit_opts):
 
 ######################################################################
     
-def initial_fit(x, y, fit_opts, A=None):
+def initial_fit(basis, y, fit_opts):
 
     assert fit_opts.fit_type in ['poly', 'fourier']
     
     if fit_opts.fit_type == 'poly':
-        p = np.polyfit(x, y, fit_opts.degree)
+        p = np.polyfit(basis, y, fit_opts.degree)
     else:
-        p, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
+        p, _, _, _ = np.linalg.lstsq(basis, y, rcond=None)
 
     if not fit_opts.is_rational:
         return p
@@ -67,30 +67,36 @@ def initial_fit(x, y, fit_opts, A=None):
 
 ######################################################################
 
-def get_fourier_matrix(x, degree):
+def get_basis(x, fit_opts):
 
-    n = 2*degree + 1
+    if fit_opts.fit_type == 'fourier':
+        
+        n = 2*fit_opts.degree + 1
 
-    A = np.zeros( (len(x), n) )
-    A[:, n-1] = 1
-    
-    for i in range(1, degree+1):
-        theta = x*2*np.pi*i
-        A[:, n-2*i] = np.sin(theta)
-        A[:, n-2*i-1] = np.cos(theta)
+        A = np.zeros( (len(x), n) )
+        A[:, n-1] = 1
 
-    return A
+        for i in range(1, fit_opts.degree+1):
+            theta = x*2*np.pi*i
+            A[:, n-2*i] = np.sin(theta)
+            A[:, n-2*i-1] = np.cos(theta)
+
+        return A
+
+    else:
+
+        return x
 
 ######################################################################
 
-def reconstruct_base(p, x, fit_opts, A=None):
+def reconstruct_base(p, basis, fit_opts):
 
     assert fit_opts.fit_type in ['poly', 'fourier']
 
     if fit_opts.fit_type == 'poly':
-        return np.polyval(p, x)
+        return np.polyval(p, basis)
     else:
-        return np.dot(A, p)
+        return np.dot(basis, p)
 
 ######################################################################
 
@@ -106,15 +112,15 @@ def split_params(p, fit_opts):
 
 ######################################################################
 
-def reconstruct(p, x, fit_opts, A=None):
+def reconstruct(p, basis, fit_opts):
 
     if fit_opts.is_rational:
         p_num, p_denom = split_params(p, fit_opts)
-        rnum = reconstruct_base(p_num, x, fit_opts, A)
-        rdenom = reconstruct_base(p_denom, x, fit_opts, A)
+        rnum = reconstruct_base(p_num, basis, fit_opts)
+        rdenom = reconstruct_base(p_denom, basis, fit_opts)
         y = rnum / rdenom
     else:
-        y = reconstruct_base(p, x, fit_opts, A)
+        y = reconstruct_base(p, basis, fit_opts)
 
     if fit_opts.clip_reconstruction is not None:
         return np.clip(y, *fit_opts.clip_reconstruction)
@@ -123,13 +129,13 @@ def reconstruct(p, x, fit_opts, A=None):
         
 ######################################################################    
     
-def fit_single_channel(cidx, x, y, A, fit_opts, output_opts):
+def fit_single_channel(cidx, x, basis, y, fit_opts, output_opts):
 
     def curve_fit_f(x, *p):
-        return reconstruct(np.array(p), x, fit_opts, A) 
+        return reconstruct(np.array(p), basis, fit_opts)
 
     def err(p):
-        return y - reconstruct(p, x, fit_opts, A)
+        return y - reconstruct(p, basis, fit_opts)
     
     def l1err(p):
         e = err(p)
@@ -142,7 +148,7 @@ def fit_single_channel(cidx, x, y, A, fit_opts, output_opts):
     # step 1/3: global least-squares fit to regular (not rational)
     # polynomial or Fourier series - for rational versions just
     # initializes denominator to the constant function f(x) = 1
-    p0 = initial_fit(x, y, fit_opts, A)
+    p0 = initial_fit(basis, y, fit_opts)
     guess = p0
 
     if fit_opts.is_rational:
@@ -334,16 +340,13 @@ def fit(key, data, fit_opts, output_opts):
     print('Fitting {}-parameter model to {} points in {}...'.format(
         nparams, npoints, key), file=output_opts.console_file)
 
-    if fit_opts.fit_type == 'fourier':
-        A = get_fourier_matrix(x, fit_opts.degree)
-    else:
-        A = None
+    basis = get_basis(x, fit_opts)
 
     coeffs = []
 
     for cidx in range(nchannels):
         channel = data[:, cidx]
-        p = fit_single_channel(cidx, x, channel, A, fit_opts, output_opts)
+        p = fit_single_channel(cidx, x, basis, channel, fit_opts, output_opts)
         coeffs.append(p)
 
     print(file=output_opts.console_file)
@@ -379,18 +382,14 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
     else:
         y0, y1 = output_opts.range
 
-    xfine = x
+    x_fine = x
     
     if npoints < output_opts.min_samples:
         factor = int(np.ceil(output_opts.min_samples / npoints))
-        xfine = np.linspace(x0, x1, npoints*factor+1, endpoint=True)
+        x_fine = np.linspace(x0, x1, npoints*factor+1, endpoint=True)
 
-    if fit_opts.fit_type == 'fourier':
-        A = get_fourier_matrix(x, fit_opts.degree)
-        Afine = get_fourier_matrix(xfine, fit_opts.degree)
-    else:
-        A = None
-        Afine = None
+    basis = get_basis(x, fit_opts)
+    basis_fine = get_basis(x_fine, fit_opts)
         
     ym = 0.05 * (y1 - y0)
 
@@ -406,19 +405,19 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
         
         channel = data[:, cidx]
 
-        px = reconstruct(p, x, fit_opts, A)
+        px = reconstruct(p, basis, fit_opts)
         max_err = max(max_err, np.abs(px - channel).max())
 
-        if xfine is not x:
-            pxfine = reconstruct(p, xfine, fit_opts, Afine)
+        if x_fine is not x:
+            px_fine = reconstruct(p, basis_fine, fit_opts)
         else:
-            pxfine = px
+            px_fine = px
 
-        reconstructions.append(pxfine)
+        reconstructions.append(px_fine)
 
         if regular_data:
             plt.plot(x, channel, color=color)
-            plt.plot(xfine, pxfine, ':', color=0.5*color, linewidth=2)
+            plt.plot(x_fine, px_fine, ':', color=0.5*color, linewidth=2)
         
     if regular_data:
         plt.xlim(x0-xm, x1+xm)
@@ -443,7 +442,7 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
         va = 'bottom'
         effects=None
 
-    plt.text(tx, ty, '{}: max err={:.3f}'.format(key, max_err),
+    plt.text(tx, ty, '{}: max err={:.3g}'.format(key, max_err),
              ha=ha, va=va, path_effects=effects)
 
 ######################################################################    
