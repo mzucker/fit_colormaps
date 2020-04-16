@@ -180,6 +180,34 @@ def fit_single_channel(cidx, x, basis, y, fit_opts, output_opts):
 
 ######################################################################
 
+def fit(key, data, fit_opts, output_opts):
+
+    npoints, nchannels = data.shape
+    
+    assert nchannels in range(1, 5)
+    
+    x = np.linspace(0, 1, npoints, endpoint=False)
+
+    _, nparams = num_coeffs(fit_opts)
+
+    print('Fitting {}-parameter model to {} points in {}...'.format(
+        nparams, npoints, key), file=output_opts.console_file)
+
+    basis = get_basis(x, fit_opts)
+
+    coeffs = []
+
+    for cidx in range(nchannels):
+        channel = data[:, cidx]
+        p = fit_single_channel(cidx, x, basis, channel, fit_opts, output_opts)
+        coeffs.append(p)
+
+    print(file=output_opts.console_file)
+
+    return np.array(coeffs)
+
+######################################################################
+
 def get_rtype(nchannels):
     
     if nchannels == 1:
@@ -325,33 +353,6 @@ def glslify(results, fit_opts, output_opts):
     for key, _, coeffs in results:
         glslify_single(key, coeffs, fit_opts, output_opts)
     
-######################################################################
-
-def fit(key, data, fit_opts, output_opts):
-
-    npoints, nchannels = data.shape
-    
-    assert nchannels in range(1, 5)
-    
-    x = np.linspace(0, 1, npoints, endpoint=False)
-
-    _, nparams = num_coeffs(fit_opts)
-
-    print('Fitting {}-parameter model to {} points in {}...'.format(
-        nparams, npoints, key), file=output_opts.console_file)
-
-    basis = get_basis(x, fit_opts)
-
-    coeffs = []
-
-    for cidx in range(nchannels):
-        channel = data[:, cidx]
-        p = fit_single_channel(cidx, x, basis, channel, fit_opts, output_opts)
-        coeffs.append(p)
-
-    print(file=output_opts.console_file)
-
-    return np.array(coeffs)
 
 ######################################################################
 
