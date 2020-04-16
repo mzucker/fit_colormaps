@@ -7,6 +7,7 @@ import os
 import scipy.optimize
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as path_effects
+from matplotlib.patches import Polygon
 
 import numpy as np
 
@@ -16,7 +17,7 @@ FitOptions = namedtuple('FitOptions',
 OutputOptions = namedtuple('OutputOptions',
                            'console_file, glsl_file, '
                            'plot_title, image_filename, '
-                           'domain, range, min_samples')
+                           'domain, range, plot_shape, min_samples')
 
 DEFAULT_FIT_OPTIONS = FitOptions(fit_type='poly',
                                  degree=4,
@@ -29,6 +30,7 @@ DEFAULT_OUTPUT_OPTIONS = OutputOptions(console_file=None,
                                        image_filename=None,
                                        domain=(0., 1.),
                                        range=None,
+                                       plot_shape=False,
                                        min_samples=256)
 
 ######################################################################
@@ -395,7 +397,11 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
     ym = 0.05 * (y1 - y0)
 
     max_err = 0
-    
+
+    reconstructions = []
+
+    regular_data = (nchannels != 2 or not output_opts.plot_shape)
+
     for cidx, p in enumerate(coeffs):
 
         color = chan_colors[cidx] * 0.75
@@ -409,19 +415,39 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
             pxfine = reconstruct(p, xfine, fit_opts)
         else:
             pxfine = px
-                             
-        
-        plt.plot(x, channel, color=color)
-        plt.plot(xfine, pxfine, ':', color=0.5*color, linewidth=2)
-        
-    plt.xlim(x0-xm, x1+xm)
-    plt.ylim(y0-ym, y1+ym)
 
-    plt.text(x1, y0, '{}: max err={:.3f}'.format(key, max_err),
-             ha='right', va='bottom',
-             path_effects=[
-                 path_effects.Stroke(linewidth=8, foreground=[1, 1, 1, 0.8]),
-                 path_effects.Normal()])
+        reconstructions.append(pxfine)
+
+        if regular_data:
+            plt.plot(x, channel, color=color)
+            plt.plot(xfine, pxfine, ':', color=0.5*color, linewidth=2)
+        
+    if regular_data:
+        plt.xlim(x0-xm, x1+xm)
+        plt.ylim(y0-ym, y1+ym)
+        tx, ty = x1, y0
+        ha = 'right'
+        va = 'bottom'
+        effects=[
+            path_effects.Stroke(linewidth=8, foreground=[1, 1, 1, 0.8]),
+            path_effects.Normal()
+        ]
+    else:
+        xshift = 0#0.5*(y1 - y0)
+        axes = plt.gca()
+        axes.add_patch(Polygon(data, ec='none', fc=[0.8]*3))
+        #plt.plot(data[:, 0]-xshift, data[:, 1], 'k-', linewidth=1)
+        plt.plot(reconstructions[0]+xshift, reconstructions[1], 'b-', linewidth=0.5)
+        plt.axis('equal')
+        plt.axis('off')
+        tx, ty = y0-xshift, y0-0.05*(y1 - y0)
+        ha = 'left'
+        va = 'top'
+        effects=None
+        
+
+    plt.text(tx, ty, '{}: max err={:.3f}'.format(key, max_err),
+             ha=ha, va=va, path_effects=effects)
 
 ######################################################################    
         
@@ -523,6 +549,11 @@ def parse_cmdline():
                         metavar='N', default=DEFAULT_OUTPUT_OPTIONS.min_samples,
                         type=int, help='min number of points in domain for plotting')
 
+    assert not DEFAULT_OUTPUT_OPTIONS.plot_shape
+
+    parser.add_argument('-s', dest='plot_shape',
+                        action='store_true',
+                        help='plot data as 2D shape')
 
 
     opts = parser.parse_args()
