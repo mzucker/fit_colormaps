@@ -132,9 +132,15 @@ def reconstruct(p, basis, fit_opts):
 
 ######################################################################
 
+def residual(p, basis, y, fit_opts):
+
+    return reconstruct(p, basis, fit_opts) - y
+
+######################################################################
+
 def loss(p, basis, y, fit_opts):
 
-    e = y - reconstruct(p, basis, fit_opts)
+    e = residual(p, basis, y, fit_opts)
     
     if fit_opts.loss == 'rmse':
         return np.sqrt(np.dot(e, e)/len(e))
@@ -143,13 +149,7 @@ def loss(p, basis, y, fit_opts):
     
 ######################################################################    
     
-def fit_single_channel(cidx, x, basis, y, fit_opts, output_opts):
-
-    def curve_fit_func(x, *p):
-        return reconstruct(np.array(p), basis, fit_opts)
-
-    def loss_func(p):
-        return loss(p, basis, y, fit_opts)
+def fit_single_channel(cidx, basis, y, fit_opts, output_opts):
 
     loss_name = LOSS_NAMES[fit_opts.loss]
     
@@ -158,8 +158,8 @@ def fit_single_channel(cidx, x, basis, y, fit_opts, output_opts):
     # initializes denominator to the constant function f(x) = 1
     p0 = initial_fit(basis, y, fit_opts)
 
-    e0 = loss_func(p0)
-    
+    args = (basis, y, fit_opts)
+    e0 = loss(p0, *args)
 
     if fit_opts.loss == 'rmse' and not fit_opts.is_rational:
         
@@ -171,7 +171,7 @@ def fit_single_channel(cidx, x, basis, y, fit_opts, output_opts):
 
     else:
 
-        max_iter = 20
+        max_iter = 1
 
     best_p1 = p0
     best_e1 = e0
@@ -188,27 +188,23 @@ def fit_single_channel(cidx, x, basis, y, fit_opts, output_opts):
             # step 2/3: local search to do least-squares fit for rational
             # polynomial or Fourier series, using output of step 1 as
             # initial guess.
-            npts = len(x)
-            _, nparams = num_coeffs(fit_opts)
-            p1, _ = scipy.optimize.curve_fit(curve_fit_func,
-                                             x, y, p1,
-                                             ftol=1e-5,
-                                             xtol=1e-5,
-                                             method='dogbox')
+            res = scipy.optimize.least_squares(residual, p1,
+                                               ftol=1e-5, xtol=1e-5,
+                                               method='dogbox', args=args)
+            p1 = res.x
 
         if fit_opts.loss == 'minimax':
             # step 3/3: local search to do minimax optimization, starting from
-            # output of step 1 or 2. in my experience, gradient-based optimizers
-            # don't do so hot minimizing maximum error (infinity norm), so using
-            # a derivative-free optimizer like nelder mead is safest.
-            res = scipy.optimize.minimize(loss_func, p1, method='Nelder-Mead')
+            # output of step 1 or 2. 
+            res = scipy.optimize.minimize(loss, p1, method='Nelder-Mead', args=args)
             p1 = res.x
 
-        e1 = loss_func(p1)
+        e1 = loss(p1, *args)
 
         improved = (e1 < best_e1)
-
-        print('    at iter {} e1 is {}{}'.format(j+1, e1, '*'*int(improved)))
+        reldist = np.abs( (p1 - p0) / np.maximum(np.abs(p0), np.abs(p1)) ).max()
+        
+        print('    at iter {} e1 is {}, max rel dist is {} {}'.format(j+1, e1, reldist, '*'*int(improved)))
 
         if improved:
             best_e1 = e1
@@ -243,7 +239,7 @@ def fit(key, data, fit_opts, output_opts):
 
     for cidx in range(nchannels):
         channel = data[:, cidx]
-        p = fit_single_channel(cidx, x, basis, channel, fit_opts, output_opts)
+        p = fit_single_channel(cidx, basis, channel, fit_opts, output_opts)
         coeffs.append(p)
 
     print(file=output_opts.console_file)
