@@ -4,6 +4,8 @@ import sys
 import argparse
 import os
 
+import quadprog
+
 import scipy.optimize
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as path_effects
@@ -12,7 +14,7 @@ from matplotlib.patches import Polygon
 import numpy as np
 
 FitOptions = namedtuple('FitOptions',
-                        'fit_type, degree, is_rational, clip_reconstruction, loss')
+                        'fit_type, numer_degree, denom_degree, clip_reconstruction, loss')
 
 OutputOptions = namedtuple('OutputOptions',
                            'console_file, glsl_file, '
@@ -20,8 +22,8 @@ OutputOptions = namedtuple('OutputOptions',
                            'domain, range, plot_shape, min_samples')
 
 DEFAULT_FIT_OPTIONS = FitOptions(fit_type='poly',
-                                 degree=4,
-                                 is_rational=True,
+                                 numer_degree=4,
+                                 denom_degree=0,
                                  clip_reconstruction=None,
                                  loss='minimax')
 
@@ -38,65 +40,78 @@ LOSS_NAMES = dict(rmse='RMSE', minimax='max error')
 
 ######################################################################
 
-def num_coeffs(fit_opts):
+def coeffs_per_degree(fit_type, degree):
 
-    assert fit_opts.fit_type in ['poly', 'fourier']
+    assert fit_type in ['poly', 'fourier']
+    assert degree >= 0
     
-    if fit_opts.fit_type == 'poly':
-        nbase = fit_opts.degree + 1
+    if fit_type == 'poly':
+        return degree + 1
     else:
-        nbase = 2 * fit_opts.degree + 1
+        return 2 * degree + 1
+
+def count_coeffs(fit_opts):
+
+    numer_coeffs = coeffs_per_degree(fit_opts.fit_type, fit_opts.numer_degree)
+    denom_coeffs = coeffs_per_degree(fit_opts.fit_type, fit_opts.denom_degree) - 1
+
+    return numer_coeffs, numer_coeffs + denom_coeffs
     
-    if not fit_opts.is_rational:
-        return nbase, nbase
-    else:
-        return nbase, 2*nbase - 1
-
-######################################################################
-    
-def initial_fit(basis, y, fit_opts):
-
-    assert fit_opts.fit_type in ['poly', 'fourier']
-    
-    if fit_opts.fit_type == 'poly':
-        p = np.polyfit(basis, y, fit_opts.degree)
-    else:
-        p, _, _, _ = np.linalg.lstsq(basis, y, rcond=None)
-
-    if not fit_opts.is_rational:
-        return p
-    else:
-        return np.hstack((p, np.zeros_like(p[1:])))
-
 ######################################################################
 
-def get_basis(x, fit_opts):
+def get_fourier_basis(x, degree):
+
+    n = 2*degree + 1
+
+    A = np.zeros( (len(x), n) )
+    A[:, n-1] = 1
+
+    for i in range(1, degree+1):
+        theta = x*2*np.pi*i
+        A[:, n-2*i] = np.sin(theta)
+        A[:, n-2*i-1] = np.cos(theta)
+
+    return A
+
+######################################################################
+
+def get_polynomial_basis(x, degree):
+
+    n = np.arange(degree, -1, -1)
+
+    A = x.reshape(-1, 1) ** n.reshape(1, -1)
+
+    return A
+    
+######################################################################
+
+def get_bases(x, fit_opts, force_matrix=False):
+
+    if fit_opts.fit_type == 'poly' and not force_matrix:
+        return (x, x)
+
+    max_degree = max(fit_opts.numer_degree, fit_opts.denom_degree)
 
     if fit_opts.fit_type == 'fourier':
-        
-        n = 2*fit_opts.degree + 1
 
-        A = np.zeros( (len(x), n) )
-        A[:, n-1] = 1
-
-        for i in range(1, fit_opts.degree+1):
-            theta = x*2*np.pi*i
-            A[:, n-2*i] = np.sin(theta)
-            A[:, n-2*i-1] = np.cos(theta)
-
-        return A
+        basis = get_fourier_basis(x, max_degree)
 
     else:
 
-        return x
+        basis = get_polynomial_basis(x, max_degree)
+
+    numer_coeffs = coeffs_per_degree(fit_opts.fit_type, fit_opts.numer_degree)
+    denom_coeffs = coeffs_per_degree(fit_opts.fit_type, fit_opts.denom_degree)
+
+    return (basis[:, -numer_coeffs:], basis[:, -denom_coeffs:])
 
 ######################################################################
 
-def reconstruct_base(p, basis, fit_opts):
+def reconstruct_base(p, basis, fit_type):
 
-    assert fit_opts.fit_type in ['poly', 'fourier']
+    assert fit_type in ['poly', 'fourier']
 
-    if fit_opts.fit_type == 'poly':
+    if fit_type == 'poly':
         return np.polyval(p, basis)
     else:
         return np.dot(basis, p)
@@ -105,25 +120,27 @@ def reconstruct_base(p, basis, fit_opts):
 
 def split_params(p, fit_opts):
     
-    nbase, ntotal = num_coeffs(fit_opts)
-    assert len(p) == ntotal
+    numer_coeffs, total_coeffs = count_coeffs(fit_opts)
+    assert len(p) == total_coeffs
 
-    pnum = p[:nbase]
-    pdenom = np.concatenate((p[nbase:], [ np.ones_like(p[0]) ] ), axis=0)
+    pnum = p[:numer_coeffs]
+    pdenom = np.concatenate((p[numer_coeffs:], [ np.ones_like(p[0]) ] ), axis=0)
 
     return pnum, pdenom
 
 ######################################################################
 
-def reconstruct(p, basis, fit_opts):
+def reconstruct(p, bases, fit_opts):
 
-    if fit_opts.is_rational:
+    numer_basis, denom_basis = bases
+
+    if fit_opts.denom_degree:
         p_num, p_denom = split_params(p, fit_opts)
-        rnum = reconstruct_base(p_num, basis, fit_opts)
-        rdenom = reconstruct_base(p_denom, basis, fit_opts)
+        rnum = reconstruct_base(p_num, numer_basis, fit_opts.fit_type)
+        rdenom = reconstruct_base(p_denom, denom_basis, fit_opts.fit_type)
         y = rnum / rdenom
     else:
-        y = reconstruct_base(p, basis, fit_opts)
+        y = reconstruct_base(p, numer_basis, fit_opts.fit_type)
 
     if fit_opts.clip_reconstruction is not None:
         return np.clip(y, *fit_opts.clip_reconstruction)
@@ -132,15 +149,15 @@ def reconstruct(p, basis, fit_opts):
 
 ######################################################################
 
-def residual(p, basis, y, fit_opts):
+def residual(p, bases, y, fit_opts):
 
-    return reconstruct(p, basis, fit_opts) - y
+    return reconstruct(p, bases, fit_opts) - y
 
 ######################################################################
 
-def loss(p, basis, y, fit_opts):
+def loss(p, bases, y, fit_opts):
 
-    e = residual(p, basis, y, fit_opts)
+    e = residual(p, bases, y, fit_opts)
     
     if fit_opts.loss == 'rmse':
         return np.sqrt(np.dot(e, e)/len(e))
@@ -149,74 +166,142 @@ def loss(p, basis, y, fit_opts):
     
 ######################################################################    
     
-def fit_single_channel(cidx, basis, y, fit_opts, output_opts):
+def fit_single_channel(cidx, bases, y, fit_opts, output_opts):
 
     loss_name = LOSS_NAMES[fit_opts.loss]
-    
-    # step 1/3: global least-squares fit to regular (not rational)
-    # polynomial or Fourier series - for rational versions just
-    # initializes denominator to the constant function f(x) = 1
-    p0 = initial_fit(basis, y, fit_opts)
+    args = (bases, y, fit_opts)
 
-    args = (basis, y, fit_opts)
-    e0 = loss(p0, *args)
+    all_p0 = []
 
-    if fit_opts.loss == 'rmse' and not fit_opts.is_rational:
+    numer_basis, denom_basis = bases
+
+    # step 1/3: global initial fit
+
+    if fit_opts.fit_type == 'poly':
+        p0 = np.polyfit(numer_basis, y, fit_opts.numer_degree)
+    else:
+        p0, _, _, _ = np.linalg.lstsq(numer_basis, y, rcond=None)
+
+    if not fit_opts.denom_degree:
         
-        max_iter = 0
+        all_p0 = [p0]
         
-    elif not fit_opts.is_rational:
-
-        max_iter = 1
-
     else:
 
-        max_iter = 1
-
-    best_p1 = p0
-    best_e1 = e0
-
-    for j in range(max_iter):
-
-        p1 = p0.copy()
-
-        if j > 0:
-            p1 += np.random.normal(size=p0.shape,
-                                   scale=0.5*np.abs(p0))
-
-        if fit_opts.is_rational:
-            # step 2/3: local search to do least-squares fit for rational
-            # polynomial or Fourier series, using output of step 1 as
-            # initial guess.
-            res = scipy.optimize.least_squares(residual, p1,
-                                               ftol=1e-5, xtol=1e-5,
-                                               method='dogbox', args=args)
-            p1 = res.x
-
-        if fit_opts.loss == 'minimax':
-            # step 3/3: local search to do minimax optimization, starting from
-            # output of step 1 or 2. 
-            res = scipy.optimize.minimize(loss, p1, method='Nelder-Mead', args=args)
-            p1 = res.x
-
-        e1 = loss(p1, *args)
-
-        improved = (e1 < best_e1)
-        reldist = np.abs( (p1 - p0) / np.maximum(np.abs(p0), np.abs(p1)) ).max()
+        numer_coeffs, total_coeffs = count_coeffs(fit_opts)
+        denom_coeffs = total_coeffs - numer_coeffs
         
-        print('    at iter {} e1 is {}, max rel dist is {} {}'.format(j+1, e1, reldist, '*'*int(improved)))
+        p0 = np.hstack([p0, np.zeros(denom_coeffs, dtype=p0.dtype)])
+        all_p0 = [p0]
 
-        if improved:
+        if fit_opts.fit_type == 'poly':
+            assert len(numer_basis.shape) == 1
+            assert np.all(numer_basis == denom_basis)
+            force_numer_basis, force_denom_basis = get_bases(numer_basis, fit_opts, True)
+        else:
+            force_numer_basis, force_denom_basis = numer_basis, denom_basis
+
+        assert len(force_numer_basis.shape) == 2
+        assert len(force_denom_basis.shape) == 2
+        assert len(y.shape) == 1
+
+        npoints, numer_coeffs2 = force_numer_basis.shape
+        npoints2, denom_coeffs_plus_one = force_denom_basis.shape
+
+        assert npoints == npoints2
+        assert numer_coeffs2 == numer_coeffs
+        assert denom_coeffs_plus_one == denom_coeffs + 1
+
+        A = np.hstack( (force_numer_basis, -force_denom_basis[:, :-1] * y.reshape(-1, 1)) )
+        assert A.shape == (npoints, numer_coeffs + denom_coeffs)
+
+        assert np.all(force_numer_basis[:, -1] == 1)
+        assert np.all(force_denom_basis[:, -1] == 1)
+        b = y
+
+        C = -A
+        C[:, :numer_coeffs] = 0
+
+        CT = C.transpose()
+
+        lambda_I = 1e-8 * np.eye(numer_coeffs + denom_coeffs)
+
+        G = np.dot(A.T, A) + lambda_I
+        a = np.dot(A.T, b)
+
+        step = 0.025
+        epsrng = np.arange(step, 1, step)
+        #epsrng = 1 - np.exp(-np.arange(1, 10))
+        all_eps = []
+
+        for eps in epsrng:
+
+            lb = np.ones_like(C[:,0])*eps - 1
+
+            p0, _, _, _, _, _ = quadprog.solve_qp(G, a, CT, lb)
+
+            denom = np.dot(C, p0) + 1
+            #print('denominator:', denom.min(), denom.max())
+
+            all_p0.append(p0)
+            all_eps.append(eps)
+
+    all_p0_loss = np.array([loss(p0, *args) for p0 in all_p0])
+
+    best_idx = all_p0_loss.argmin()
+
+    best_p0 = all_p0[best_idx]
+    best_e0 = all_p0_loss[best_idx]
+
+    #all_p0 = all_p0[best_idx:best_idx+1]
+
+    best_p1 = None
+    best_e1 = None
+
+    for p0 in all_p0:
+
+        e0 = loss(p0, *args)
+
+        p1 = p0
+        e1 = e0
+
+        if (fit_opts.loss == 'minimax' or fit_opts.denom_degree) :
+
+            p1 = p0.copy()
+
+            if fit_opts.denom_degree:
+                # step 2/3: local search to do least-squares fit for rational
+                # polynomial or Fourier series, using output of step 1 as
+                # initial guess.
+                res = scipy.optimize.least_squares(residual, p1,
+                                                   ftol=1e-5, xtol=1e-5,
+                                                   method='dogbox', args=args)
+                p1 = res.x
+
+            if fit_opts.loss == 'minimax':
+                # step 3/3: local search to do minimax optimization, starting from
+                # output of step 1 or 2. 
+                res = scipy.optimize.minimize(loss, p1,
+                                              method='Nelder-Mead',
+                                              args=args)
+                p1 = res.x
+
+            e1 = loss(p1, *args)
+
+        updated = (best_e1 is None or e1 < best_e1)
+
+        if updated:
             best_e1 = e1
             best_p1 = p1
+            updated = True
+            
+        print('  - channel {} {}: {:.7f} -> {:.7f} ({:6.2f}%){}'.format(
+            cidx, loss_name, best_e0, e1, 100.0*e1/best_e0, ' *** new min ***' if updated else ''),
+              file=output_opts.console_file)
 
-    p1 = best_p1
-    e1 = best_e1
+    print(file=output_opts.console_file)
     
-    print('  - channel {} {}: {:.7f} -> {:.7f} ({:.2f}%)'.format(
-        cidx, loss_name, e0, e1, 100.0*e1/e0), file=output_opts.console_file)
-    
-    return p1
+    return best_p1
 
 ######################################################################
 
@@ -228,21 +313,20 @@ def fit(key, data, fit_opts, output_opts):
     
     x = np.linspace(0, 1, npoints, endpoint=False)
 
-    _, nparams = num_coeffs(fit_opts)
+    _, total_coeffs = count_coeffs(fit_opts)
 
-    print('Fitting {}-parameter model to {} points in {}...'.format(
-        nparams, npoints, key), file=output_opts.console_file)
+    print('Fitting {}-parameter model to {} points in {}...\n'.format(
+        total_coeffs, npoints, key), file=output_opts.console_file)
 
-    basis = get_basis(x, fit_opts)
-
+    bases = get_bases(x, fit_opts)
+    
     coeffs = []
 
     for cidx in range(nchannels):
         channel = data[:, cidx]
-        p = fit_single_channel(cidx, basis, channel, fit_opts, output_opts)
+        p = fit_single_channel(cidx, bases,
+                               channel, fit_opts, output_opts)
         coeffs.append(p)
-
-    print(file=output_opts.console_file)
 
     return np.array(coeffs)
 
@@ -278,8 +362,8 @@ def glslify_base(p, fit_opts, prefix):
     rval = ''
 
     if fit_opts.fit_type == 'poly':
-        
-        assert len(p) == fit_opts.degree + 1
+
+        degree = len(p) - 1
         
         degree0_is_1 = False
         
@@ -292,23 +376,23 @@ def glslify_base(p, fit_opts, prefix):
                 
         result += '\n'
         
-        for i in range(fit_opts.degree + 1):
+        for i in range(degree + 1):
             if i == 0 and degree0_is_1:
                 rval += '1.0'
             else:
                 rval += '{}{}'.format(prefix, i)
-            if i < fit_opts.degree:
+            if i < degree:
                 rval += '+t*'
-            if i < fit_opts.degree-1:
+            if i < degree-1:
                 rval += '('
                 
-        rval += ')'*(fit_opts.degree-1)
+        rval += ')'*(degree-1)
         
     else:
-        
-        assert len(p) == 2*fit_opts.degree + 1
 
-        n = 2*fit_opts.degree + 1
+        n = len(p)
+        degree = (n - 1) // 2
+        assert n == 2*degree + 1
 
         if np.all(p[-1] == 1):
             rval += '1.0'
@@ -327,7 +411,7 @@ def glslify_base(p, fit_opts, prefix):
 
         result += '    {} {} = {};\n'.format(rtype, prefix, c0)
 
-        for i in range(1, fit_opts.degree+1):
+        for i in range(1, degree+1):
             
             s = p[n-2*i]
             c = p[n-2*i-1]
@@ -337,7 +421,7 @@ def glslify_base(p, fit_opts, prefix):
 
         result += '\n'
 
-    if fit_opts.is_rational:
+    if fit_opts.denom_degree:
         if fit_opts.fit_type == 'poly':
             vname = dict(n='num', d='denom')[prefix]
             result += '    {} {} = {};\n\n'.format(rtype, vname, rval)
@@ -357,9 +441,11 @@ def glslify_single(key, coeffs, fit_opts, output_opts):
 
     function = '{} {}(float t) {{\n\n'.format(get_rtype(nchannels), key)
 
+    max_degree = max(fit_opts.numer_degree, fit_opts.denom_degree)
+
     if fit_opts.fit_type == 'fourier':
         function += '    t *= 6.283185307179586;\n\n'
-        for i in range(1, fit_opts.degree+1):
+        for i in range(1, max_degree+1):
             if i == 1:
                 timest = 't'
             else:
@@ -368,7 +454,7 @@ def glslify_single(key, coeffs, fit_opts, output_opts):
                 i, timest, timest)
         function += '\n'
 
-    if fit_opts.is_rational:
+    if fit_opts.denom_degree:
         p_num, p_denom = split_params(coeffs.T, fit_opts)
         function += glslify_base(p_num, fit_opts, 'n')
         function += glslify_base(p_denom, fit_opts, 'd')
@@ -418,8 +504,8 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
         x = np.linspace(x0, x1, npoints, endpoint=False)
 
     if output_opts.range is None:
-        y0 = np.floor(data.min())
-        y1 = np.ceil(data.max())
+        y0 = np.floor(data.min() + 1e-7)
+        y1 = np.ceil(data.max() - 1e-7 )
     else:
         y0, y1 = output_opts.range
 
@@ -429,8 +515,8 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
         factor = int(np.ceil(output_opts.min_samples / npoints))
         x_fine = np.linspace(x0, x1, npoints*factor+1, endpoint=True)
 
-    basis = get_basis(x, fit_opts)
-    basis_fine = get_basis(x_fine, fit_opts)
+    bases = get_bases(x, fit_opts)
+    bases_fine = get_bases(x_fine, fit_opts)
         
     ym = 0.05 * (y1 - y0)
 
@@ -447,11 +533,11 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
         
         channel = data[:, cidx]
 
-        px = reconstruct(p, basis, fit_opts)
-        losses.append(loss(p, basis, channel, fit_opts))
+        px = reconstruct(p, bases, fit_opts)
+        losses.append(loss(p, bases, channel, fit_opts))
 
         if x_fine is not x:
-            px_fine = reconstruct(p, basis_fine, fit_opts)
+            px_fine = reconstruct(p, bases_fine, fit_opts)
         else:
             px_fine = px
 
@@ -477,18 +563,20 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
         axes.add_patch(Polygon(data, ec='none', fc=[0.8]*3))
         #plt.plot(data[:, 0]-xshift, data[:, 1], 'k-', linewidth=1)
         plt.plot(reconstructions[0]+xshift, reconstructions[1], 'b-', linewidth=0.5)
+        plt.plot([y0, y1, y1, y0], [y0, y0, y1, y1], '.', color='none')
         plt.axis('equal')
         plt.axis('off')
-        tx, ty = y0-xshift, y0
-        ha = 'left'
-        va = 'bottom'
+        tx, ty = 0.5*(y0+y1), y0-0.025*(y1-y0)
+        ha = 'center'
+        va = 'top'
         effects=None
 
     loss_name = LOSS_NAMES[fit_opts.loss]
     losses = np.array(losses)
-
-    plt.text(tx, ty, '{}: avg. chan. {}={:.3g}'.format(
-        key, loss_name, losses.mean()),
+    #with np.printoptions(formatter={'all':lambda x: '{:.3g}'.format(x)}) as opts:
+    lstr = np.array2string(losses, formatter=dict(all=lambda x:'{:.3g}'.format(x)), separator=', ')
+    plt.text(tx, ty, '{}: per-channel {}={}, total={:.3g}'.format(
+        key, loss_name, lstr, losses.sum()),
              ha=ha, va=va, path_effects=effects)
 
 ######################################################################    
@@ -544,10 +632,15 @@ def parse_cmdline():
                         default=DEFAULT_FIT_OPTIONS.fit_type,
                         help='type of fit')
 
-    parser.add_argument('-d', dest='degree',
+    parser.add_argument('-n', dest='numer_degree',
                         metavar='N',
-                        type=int, default=DEFAULT_FIT_OPTIONS.degree,
-                        help='degree of polynomial/fourier series')
+                        type=int, default=DEFAULT_FIT_OPTIONS.numer_degree,
+                        help='degree of numerator')
+
+    parser.add_argument('-d', dest='denom_degree',
+                        metavar='N',
+                        type=int, default=DEFAULT_FIT_OPTIONS.denom_degree,
+                        help='degree of denominator')
     
     parser.add_argument('-c', dest='clip_reconstruction',
                         metavar='Y0,Y1',
@@ -560,12 +653,6 @@ def parse_cmdline():
                         default=DEFAULT_FIT_OPTIONS.loss,
                         help='loss function')
 
-    assert DEFAULT_FIT_OPTIONS.is_rational
-    
-    parser.add_argument('-R', dest='is_rational',
-                        action='store_false',
-                        help='don\'t use rational approximation')
-        
     parser.add_argument('-g', dest='glsl_filename',
                         metavar='FILENAME.glsl',
                         default=None,
@@ -614,16 +701,18 @@ def parse_cmdline():
     fit_opts = fill_tuple(FitOptions, vars(opts))
 
     if opts.plot_title is None:
-        rlabel = 'rational ' if fit_opts.is_rational else ''
+        rlabel = '/{} rational'.format(fit_opts.denom_degree) if fit_opts.denom_degree else ''
         if fit_opts.fit_type == 'poly':
-            opts.plot_title = 'Degree {} {}polynomial'.format(
-                fit_opts.degree, rlabel)
+            opts.plot_title = 'Degree {}{} polynomial'.format(
+                fit_opts.numer_degree, rlabel)
         else:
-            opts.plot_title = 'Order {} {}Fourier series'.format(
-                fit_opts.degree, rlabel)
+            opts.plot_title = 'Order {}{} Fourier series'.format(
+                fit_opts.numer_degree, rlabel)
         if fit_opts.clip_reconstruction is not None:
             opts.plot_title += ' clipped to [{:g},{:g}]'.format(
                 *fit_opts.clip_reconstruction)
+        _, total_coeffs = count_coeffs(fit_opts)
+        opts.plot_title += ' ({} coefficients per channel)'.format(total_coeffs)
 
     opts.console_file = sys.stdout
             
