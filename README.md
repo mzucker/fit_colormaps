@@ -32,3 +32,18 @@ For discussion and details, see <https://twitter.com/matt_zucker/status/12502449
 
 See example output on Shadertoy at <https://www.shadertoy.com/results?query=tag%3Dfitcolormap>
 
+## Setup
+
+Windows:
+
+    python -m venv --system-site-packages --prompt fit_colormaps venv
+    venv\scripts\activate.bat
+    python -m pip install --upgrade pip setuptools wheel
+    python -m pip install numpy scipy matplotlib quadprog
+
+Or on Mac/Linux:
+
+    python -m venv --system-site-packages --prompt fit_colormaps venv
+    source venv/bin/activate
+    python -m pip install --upgrade pip setuptools wheel
+    python -m pip install numpy scipy matplotlib quadprog
