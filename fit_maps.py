@@ -13,34 +13,72 @@ from matplotlib.patches import Polygon
 
 import numpy as np
 
+######################################################################
+
 FitOptions = namedtuple('FitOptions',
-                        'fit_type, numer_degree, denom_degree, clip_reconstruction, loss')
+                        'fit_type, numer_degree, denom_degree, clip_output, loss')
+
+FitOptions.__doc__ = """
+
+Options to control the fit. Members:
+
+  fit_type:     Either 'poly' or 'fourier'
+  numer_degree: Degree of numerator.
+  denom_degree: Degree of denominator.
+  clip_output:  Either None or a (lo, hi) tuple to clip output.
+  loss:         Either 'minimax' or 'rmse'
+
+"""
+
+######################################################################
 
 OutputOptions = namedtuple('OutputOptions',
                            'console_file, glsl_file, '
                            'plot_title, image_filename, '
                            'domain, range, plot_shape, min_samples')
 
-DEFAULT_FIT_OPTIONS = FitOptions(fit_type='poly',
-                                 numer_degree=4,
-                                 denom_degree=0,
-                                 clip_reconstruction=None,
-                                 loss='minimax')
+OutputOptions.__doc__ = """
 
-DEFAULT_OUTPUT_OPTIONS = OutputOptions(console_file=None,
-                                       glsl_file=None,
-                                       plot_title=None,
-                                       image_filename=None,
-                                       domain=(0., 1.),
-                                       range=None,
-                                       plot_shape=False,
-                                       min_samples=256)
+Options to control program output. Members:
 
-LOSS_NAMES = dict(rmse='RMSE', minimax='max error')
+  console_file:   File where text output should go
+  glsl_file:      File for GLSL program output
+  plot_title:     Title for plot (None for auto-generated)
+  image_filename: Filename to save output plot to
+  domain:         X-axis limits for non-shape plots
+  range:          Y-axis limits for non-shape plots
+  plot_shape:     Boolean flag whether to plot 2D data as a shape
+  min_samples:    Minimum # of samples for smooth plots
+
+"""
+
+######################################################################
+# default options
+
+_DEFAULT_FIT_OPTIONS = FitOptions(fit_type='poly',
+                                  numer_degree=4,
+                                  denom_degree=0,
+                                  clip_output=None,
+                                  loss='minimax')
+
+_DEFAULT_OUTPUT_OPTIONS = OutputOptions(console_file=None,
+                                        glsl_file=None,
+                                        plot_title=None,
+                                        image_filename=None,
+                                        domain=(0., 1.),
+                                        range=None,
+                                        plot_shape=False,
+                                        min_samples=256)
+
+# labels for output
+_LOSS_NAMES = dict(rmse='RMSE', minimax='max error')
 
 ######################################################################
 
 def coeffs_per_degree(fit_type, degree):
+
+    """Compute the number of coefficients for a given degree
+    for either polynomial or fourier basis."""
 
     assert fit_type in ['poly', 'fourier']
     assert degree >= 0
@@ -50,7 +88,12 @@ def coeffs_per_degree(fit_type, degree):
     else:
         return 2 * degree + 1
 
+######################################################################
+
 def count_coeffs(fit_opts):
+
+    """Count coefficients in numerator and total coefficients
+    for a given set of fit options."""
 
     numer_coeffs = coeffs_per_degree(fit_opts.fit_type, fit_opts.numer_degree)
     denom_coeffs = coeffs_per_degree(fit_opts.fit_type, fit_opts.denom_degree) - 1
@@ -59,7 +102,19 @@ def count_coeffs(fit_opts):
     
 ######################################################################
 
-def get_fourier_basis(x, degree):
+def get_fourier_matrix(x, degree):
+
+    """Return a matrix where row i is
+
+      [ cos(2*pi*n*x_i),     sin(2*pi*n*x_i),
+        cos(2*pi*(n-1)*x_i), sin(2*pi*(n-1)*x_i)),
+        ...
+        cos(2*pi*2*x_i),     sin(2*pi*2*x_i),
+        cos(2*pi*x_i),       sin(2*pi*x_i),
+        1 ]
+
+    For degree n.
+    """
 
     n = 2*degree + 1
 
@@ -68,14 +123,21 @@ def get_fourier_basis(x, degree):
 
     for i in range(1, degree+1):
         theta = x*2*np.pi*i
-        A[:, n-2*i] = np.sin(theta)
-        A[:, n-2*i-1] = np.cos(theta)
+        A[:, n-2*i-1] = np.sin(theta)
+        A[:, n-2*i] = np.cos(theta)
 
     return A
 
 ######################################################################
 
-def get_polynomial_basis(x, degree):
+def get_polynomial_matrix(x, degree):
+
+    """Return a matrix where row i is
+
+      [ x**n, x**(n-1), ..., x**2, x, 1 ]
+
+    For degree n.
+    """
 
     n = np.arange(degree, -1, -1)
 
@@ -85,79 +147,129 @@ def get_polynomial_basis(x, degree):
     
 ######################################################################
 
-def get_bases(x, fit_opts, force_matrix=False):
+def get_data_matrices(x, fit_opts, full=False):
 
-    if fit_opts.fit_type == 'poly' and not force_matrix:
+    """Get the data matrices needed for least-squares fitting, evaluated
+    at the 1D points x.
+
+    Each data matrix is an m-by-k matrix D(x) such that evaluating the
+    function f(x) at each data point can be achieved by multiplying
+    the matrix D(x) by a k-by-1 vector p of coefficients:
+
+      f(x) = D(x) p
+
+    Since least-squares polynomial fitting is built into numpy, when
+    fit_opts.fit_type == 'poly' and full is False, the data matrix is
+    replaced by the x array which can be passed along to np.polyfit().
+
+    This function returns two matrices, one for the numerator and
+    one for the denominator. The denominator matrix will be trivial
+    if fit_opts.denom_degree == 1.
+
+    """
+
+    if fit_opts.fit_type == 'poly' and not full:
         return (x, x)
 
     max_degree = max(fit_opts.numer_degree, fit_opts.denom_degree)
 
     if fit_opts.fit_type == 'fourier':
 
-        basis = get_fourier_basis(x, max_degree)
-
+        data_matrix = get_fourier_matrix(x, max_degree)
+        
     else:
 
-        basis = get_polynomial_basis(x, max_degree)
+        data_matrix = get_polynomial_matrix(x, max_degree)
 
-    numer_coeffs = coeffs_per_degree(fit_opts.fit_type, fit_opts.numer_degree)
-    denom_coeffs = coeffs_per_degree(fit_opts.fit_type, fit_opts.denom_degree)
+    num_numer_coeffs = coeffs_per_degree(fit_opts.fit_type, fit_opts.numer_degree)
+    num_denom_coeffs = coeffs_per_degree(fit_opts.fit_type, fit_opts.denom_degree)
 
-    return (basis[:, -numer_coeffs:], basis[:, -denom_coeffs:])
+    numer_matrix = data_matrix[:, -num_numer_coeffs:]
+    denom_matrix = data_matrix[:, -num_denom_coeffs:]
+
+    return (numer_matrix, denom_matrix)
 
 ######################################################################
 
-def reconstruct_base(p, basis, fit_type):
+def evaluate_single(coeffs, data_matrix, fit_type):
+
+    """ Evaluate a single (numerator or denominator) function f(x)
+    either using numpy.polyval or using matrix multiplication of
+    the data matrix:
+
+       f(x) = D(x) * p
+
+    Where the data matrix D(x) is m-by-k and the coefficient
+    matrix p is k-by-1.
+
+    Returns the vector f(x) of size m-by-1.
+    """
 
     assert fit_type in ['poly', 'fourier']
 
     if fit_type == 'poly':
-        return np.polyval(p, basis)
+        return np.polyval(coeffs, data_matrix)
     else:
-        return np.dot(basis, p)
+        return np.dot(data_matrix, coeffs)
 
 ######################################################################
 
-def split_params(p, fit_opts):
-    
-    numer_coeffs, total_coeffs = count_coeffs(fit_opts)
-    assert len(p) == total_coeffs
+def split_params(coeffs, fit_opts):
 
-    pnum = p[:numer_coeffs]
-    pdenom = np.concatenate((p[numer_coeffs:], [ np.ones_like(p[0]) ] ), axis=0)
+    """Given a combined vector of coefficients for the numerator and the
+    denominator, split them into two individual vectors of
+    coefficients and append the constant 1 coefficient into the
+    denominator coefficient vector.
+    """
+    
+    num_numer_coeffs, total_coeffs = count_coeffs(fit_opts)
+    assert len(coeffs) == total_coeffs
+
+    pnum = coeffs[:num_numer_coeffs]
+    pdenom = np.concatenate((coeffs[num_numer_coeffs:], [ np.ones_like(coeffs[0]) ] ), axis=0)
 
     return pnum, pdenom
 
 ######################################################################
 
-def reconstruct(p, bases, fit_opts):
+def evaluate(coeffs, data_matrices, fit_opts):
 
-    numer_basis, denom_basis = bases
+    """Evaluate a rational function by independently
+    evaluating the numerator and the denominator separately,
+    dividing them, and clipping output if necessary.
+    """
+
+    numer_data_matrix, denom_data_matrix = data_matrices
 
     if fit_opts.denom_degree:
-        p_num, p_denom = split_params(p, fit_opts)
-        rnum = reconstruct_base(p_num, numer_basis, fit_opts.fit_type)
-        rdenom = reconstruct_base(p_denom, denom_basis, fit_opts.fit_type)
+        coeffs_num, coeffs_denom = split_params(coeffs, fit_opts)
+        rnum = evaluate_single(coeffs_num, numer_data_matrix, fit_opts.fit_type)
+        rdenom = evaluate_single(coeffs_denom, denom_data_matrix, fit_opts.fit_type)
         y = rnum / rdenom
     else:
-        y = reconstruct_base(p, numer_basis, fit_opts.fit_type)
+        y = evaluate_single(coeffs, numer_data_matrix, fit_opts.fit_type)
 
-    if fit_opts.clip_reconstruction is not None:
-        return np.clip(y, *fit_opts.clip_reconstruction)
+    if fit_opts.clip_output is not None:
+        return np.clip(y, *fit_opts.clip_output)
     else:
         return y
 
 ######################################################################
 
-def residual(p, bases, y, fit_opts):
+def residual(coeffs, data_matrices, y, fit_opts):
 
-    return reconstruct(p, bases, fit_opts) - y
+    """Compute the residual vector f(x) - y for least squares or minimax
+    fitting."""
+
+    return evaluate(coeffs, data_matrices, fit_opts) - y
 
 ######################################################################
 
-def loss(p, bases, y, fit_opts):
+def loss(coeffs, data_matrices, y, fit_opts):
 
-    e = residual(p, bases, y, fit_opts)
+    """Computes the RMSE error or maximum error of the residual."""
+
+    e = residual(coeffs, data_matrices, y, fit_opts)
     
     if fit_opts.loss == 'rmse':
         return np.sqrt(np.dot(e, e)/len(e))
@@ -166,67 +278,125 @@ def loss(p, bases, y, fit_opts):
     
 ######################################################################    
     
-def fit_single_channel(cidx, bases, y, fit_opts, output_opts):
+def fit_single_channel(cidx, x, y, fit_opts, output_opts):
 
-    loss_name = LOSS_NAMES[fit_opts.loss]
-    args = (bases, y, fit_opts)
+    """Fit a 1D function f(x) to given data y. Note
+    that cidx, the channel index, is just used for printed output.
+    """
 
-    all_p0 = []
+    loss_name = _LOSS_NAMES[fit_opts.loss]
 
-    numer_basis, denom_basis = bases
+    data_matrices = get_data_matrices(x, fit_opts)
 
+    args = (data_matrices, y, fit_opts)
+
+    numer_data_matrix, denom_data_matrix = data_matrices
+
+    ############################################################
     # step 1/3: global initial fit
 
     if fit_opts.fit_type == 'poly':
-        p0 = np.polyfit(numer_basis, y, fit_opts.numer_degree)
+        init_coeffs = np.polyfit(numer_data_matrix, y, fit_opts.numer_degree)
     else:
-        p0, _, _, _ = np.linalg.lstsq(numer_basis, y, rcond=None)
+        init_coeffs, _, _, _ = np.linalg.lstsq(numer_data_matrix, y, rcond=None)
+
+    ############################################################
+    # step 2/3: fit numerator and denominator coefficients
+    # using quadratic program
 
     if not fit_opts.denom_degree:
         
-        all_p0 = [p0]
+        # can skip this step if not rational
+        all_init_coeffs = [init_coeffs]
         
     else:
 
-        numer_coeffs, total_coeffs = count_coeffs(fit_opts)
-        denom_coeffs = total_coeffs - numer_coeffs
+        num_numer_coeffs, total_coeffs = count_coeffs(fit_opts)
+        num_denom_coeffs = total_coeffs - num_numer_coeffs
         
-        p0 = np.hstack([p0, np.zeros(denom_coeffs, dtype=p0.dtype)])
-        all_p0 = [p0]
+        init_coeffs = np.hstack([init_coeffs, np.zeros(num_denom_coeffs, dtype=init_coeffs.dtype)])
+        all_init_coeffs = [init_coeffs]
 
         if fit_opts.fit_type == 'poly':
-            assert len(numer_basis.shape) == 1
-            assert np.all(numer_basis == denom_basis)
-            force_numer_basis, force_denom_basis = get_bases(numer_basis, fit_opts, True)
+            assert len(numer_data_matrix.shape) == 1
+            assert np.all(numer_data_matrix == denom_data_matrix)
+            numer_full_matrix, denom_full_matrix = get_data_matrices(numer_data_matrix, fit_opts, full=True)
         else:
-            force_numer_basis, force_denom_basis = numer_basis, denom_basis
+            numer_full_matrix, denom_full_matrix = numer_data_matrix, denom_data_matrix
 
-        assert len(force_numer_basis.shape) == 2
-        assert len(force_denom_basis.shape) == 2
+        assert len(numer_full_matrix.shape) == 2
+        assert len(denom_full_matrix.shape) == 2
         assert len(y.shape) == 1
 
-        npoints, numer_coeffs2 = force_numer_basis.shape
-        npoints2, denom_coeffs_plus_one = force_denom_basis.shape
+        npoints = numer_full_matrix.shape[0]
 
-        assert npoints == npoints2
-        assert numer_coeffs2 == numer_coeffs
-        assert denom_coeffs_plus_one == denom_coeffs + 1
+        '''
+        
+        Notation:
 
-        A = np.hstack( (force_numer_basis, -force_denom_basis[:, :-1] * y.reshape(-1, 1)) )
-        assert A.shape == (npoints, numer_coeffs + denom_coeffs)
+        Let the numerator data matrix be N(x), and denote its i'th row as N_i^T    (1-by-k)
+        Let the denominator data matrix be D(x), and denote its i'th row as D_i^T  (1-by-j)
 
-        assert np.all(force_numer_basis[:, -1] == 1)
-        assert np.all(force_denom_basis[:, -1] == 1)
+        The overall coefficients are given by the numerator coefficients p (k-by-1) and the denominator coefficients q (j-by-1).
+        
+        The i'th function value for the rational function f(x) is given by:
+
+                       N_i^T p
+            f(x_i) = -----------
+                     D_i^T q + 1
+
+        Note we want f(x_i) = y_i for all i.
+
+        Cross-multipliying, we get 
+
+            N_i^T p = (D_i^T q + 1) * y_i
+            N_i^T p = y_i * D_i^T q + y_i
+        
+        Rearranging to put the unknown coefficients p and q on the left-hand side we get
+
+            N_i^T p - y_i * D_i^T q = y_i
+
+        Let the overall coefficient vector w be the concatenation of p and q. 
+        Also let the row vector A_i^T be the concatenation of N_i^T and -y_i * D_i^T.
+
+        We now have the transformed system
+
+            A_i^T w = y_i
+
+        Furthermore suppose that we want to enforce a constraint that the denominator
+        is larger than a constant, that is
+
+           D_i^T q + 1 >= eps
+
+        for all i. This gives us the condition
+
+           D_i^T q >= eps - 1
+
+        This forms the basis of our quadratic program.
+        
+        '''
+
+        assert npoints == denom_full_matrix.shape[0]
+        assert numer_full_matrix.shape[1] == num_numer_coeffs
+        assert denom_full_matrix.shape[1] == num_denom_coeffs + 1
+
+        A = np.hstack( (numer_full_matrix, -denom_full_matrix[:, :-1] * y.reshape(-1, 1)) )
+        assert A.shape == (npoints, num_numer_coeffs + num_denom_coeffs)
+
+        assert np.all(numer_full_matrix[:, -1] == 1)
+        assert np.all(denom_full_matrix[:, -1] == 1)
         b = y
 
-        C = -A
-        C[:, :numer_coeffs] = 0
+        C = np.zeros_like(A)
+        C[:, num_numer_coeffs:] = denom_full_matrix[:, :-1]
 
         CT = C.transpose()
 
-        lambda_I = 1e-8 * np.eye(numer_coeffs + denom_coeffs)
+        # NOTE: had some issues with singularities, so was messing around with this
+        # not sure if needed? -MZ 1/13/21
+        #lambda_I = 1e-8 * np.eye(total_coeffs)
 
-        G = np.dot(A.T, A) + lambda_I
+        G = np.dot(A.T, A) # + lambda_I
         a = np.dot(A.T, b)
 
         step = 0.025
@@ -238,36 +408,36 @@ def fit_single_channel(cidx, bases, y, fit_opts, output_opts):
 
             lb = np.ones_like(C[:,0])*eps - 1
 
-            p0, _, _, _, _, _ = quadprog.solve_qp(G, a, CT, lb)
+            init_coeffs, _, _, _, _, _ = quadprog.solve_qp(G, a, CT, lb)
 
-            denom = np.dot(C, p0) + 1
+            denom = np.dot(C, init_coeffs) + 1
             #print('denominator:', denom.min(), denom.max())
 
-            all_p0.append(p0)
+            all_init_coeffs.append(init_coeffs)
             all_eps.append(eps)
 
-    all_p0_loss = np.array([loss(p0, *args) for p0 in all_p0])
+    all_init_coeffs_loss = np.array([loss(init_coeffs, *args) for init_coeffs in all_init_coeffs])
 
-    best_idx = all_p0_loss.argmin()
+    best_idx = all_init_coeffs_loss.argmin()
 
-    best_p0 = all_p0[best_idx]
-    best_e0 = all_p0_loss[best_idx]
+    best_init_coeffs = all_init_coeffs[best_idx]
+    best_e0 = all_init_coeffs_loss[best_idx]
 
-    #all_p0 = all_p0[best_idx:best_idx+1]
+    #all_init_coeffs = all_init_coeffs[best_idx:best_idx+1]
 
     best_p1 = None
     best_e1 = None
 
-    for p0 in all_p0:
+    for init_coeffs in all_init_coeffs:
 
-        e0 = loss(p0, *args)
+        e0 = loss(init_coeffs, *args)
 
-        p1 = p0
+        p1 = init_coeffs
         e1 = e0
 
         if (fit_opts.loss == 'minimax' or fit_opts.denom_degree) :
 
-            p1 = p0.copy()
+            p1 = init_coeffs.copy()
 
             if fit_opts.denom_degree:
                 # step 2/3: local search to do least-squares fit for rational
@@ -305,7 +475,9 @@ def fit_single_channel(cidx, bases, y, fit_opts, output_opts):
 
 ######################################################################
 
-def fit(key, data, fit_opts, output_opts):
+def fit(name, data, fit_opts, output_opts):
+
+    """Fit all channels sequentially."""
 
     npoints, nchannels = data.shape
     
@@ -316,24 +488,26 @@ def fit(key, data, fit_opts, output_opts):
     _, total_coeffs = count_coeffs(fit_opts)
 
     print('Fitting {}-parameter model to {} points in {}...\n'.format(
-        total_coeffs, npoints, key), file=output_opts.console_file)
+        total_coeffs, npoints, name), file=output_opts.console_file)
 
-    bases = get_bases(x, fit_opts)
-    
-    coeffs = []
+    all_coeffs = []
 
     for cidx in range(nchannels):
         channel = data[:, cidx]
-        p = fit_single_channel(cidx, bases,
+        coeffs = fit_single_channel(cidx, x,
                                channel, fit_opts, output_opts)
-        coeffs.append(p)
+        all_coeffs.append(coeffs)
 
-    return np.array(coeffs)
+    return np.array(all_coeffs)
 
 ######################################################################
 
-def get_rtype(nchannels):
-    
+def get_glsl_type(nchannels):
+
+    """GLSL output type is either float for 1D data or vecN for N-dimensional arrays."""
+
+    assert nchannels <= 4
+
     if nchannels == 1:
         return 'float'
     else:
@@ -341,38 +515,43 @@ def get_rtype(nchannels):
 
 ######################################################################
 
-def vecstr(v):
+def glsl_constant_string(v):
+
+    """Convert scalar or vector to GLSL constant."""
+
     fmt = '{:.16g}'
     if len(v) == 1:
         return fmt.format(v[0])
     else:
         interior = ', '.join(fmt.format(vi) for vi in v)
-        return get_rtype(len(v)) + '(' + interior + ')'
+        return get_glsl_type(len(v)) + '(' + interior + ')'
     
 ######################################################################
 
-def glslify_base(p, fit_opts, prefix):
+def glslify_single(coeffs, fit_opts, prefix):
 
+    """Get GLSL output for numerator or denominator."""
+    
     assert fit_opts.fit_type in ['poly', 'fourier']
 
-    nchannels = p.shape[1]
-    rtype = get_rtype(nchannels)
+    nchannels = coeffs.shape[1]
+    rtype = get_glsl_type(nchannels)
 
     result = ''
     rval = ''
 
     if fit_opts.fit_type == 'poly':
 
-        degree = len(p) - 1
+        degree = len(coeffs) - 1
         
         degree0_is_1 = False
         
-        for i, v in enumerate(reversed(p)):
+        for i, v in enumerate(reversed(coeffs)):
             if i == 0 and np.all(v == 1):
                 degree0_is_1 = True
             else:
                 result += '    const {} {}{} = {};\n'.format(
-                    rtype, prefix, i, vecstr(v))
+                    rtype, prefix, i, glsl_constant_string(v))
                 
         result += '\n'
         
@@ -390,34 +569,34 @@ def glslify_base(p, fit_opts, prefix):
         
     else:
 
-        n = len(p)
+        n = len(coeffs)
         degree = (n - 1) // 2
         assert n == 2*degree + 1
 
-        if np.all(p[-1] == 1):
+        if np.all(coeffs[-1] == 1):
             rval += '1.0'
         else:
-            rval += vecstr(p[0])
+            rval += glsl_constant_string(coeffs[0])
 
         rval += prefix
 
-        if np.all(p[-1] == 1):
+        if np.all(coeffs[-1] == 1):
             if rtype == 'float':
                 c0 = '1.0'
             else:
                 c0 = '{}(1.0)'.format(rtype)
         else:
-            c0 = vecstr(p[-1])
+            c0 = glsl_constant_string(coeffs[-1])
 
         result += '    {} {} = {};\n'.format(rtype, prefix, c0)
 
         for i in range(1, degree+1):
             
-            s = p[n-2*i]
-            c = p[n-2*i-1]
+            s = coeffs[n-2*i-1]
+            c = coeffs[n-2*i]
             
-            result += '    {} += {}*cs{}.x;\n'.format(prefix, vecstr(c), i)
-            result += '    {} += {}*cs{}.y;\n'.format(prefix, vecstr(s), i)
+            result += '    {} += {}*cs{}.x;\n'.format(prefix, glsl_constant_string(c), i)
+            result += '    {} += {}*cs{}.y;\n'.format(prefix, glsl_constant_string(s), i)
 
         result += '\n'
 
@@ -435,54 +614,53 @@ def glslify_base(p, fit_opts, prefix):
 
 ######################################################################
 
-def glslify_single(key, coeffs, fit_opts, output_opts):
-
-    nchannels = coeffs.shape[1]
-
-    function = '{} {}(float t) {{\n\n'.format(get_rtype(nchannels), key)
-
-    max_degree = max(fit_opts.numer_degree, fit_opts.denom_degree)
-
-    if fit_opts.fit_type == 'fourier':
-        function += '    t *= 6.283185307179586;\n\n'
-        for i in range(1, max_degree+1):
-            if i == 1:
-                timest = 't'
-            else:
-                timest = '{}.0*t'.format(i)
-            function += '    vec2 cs{} = vec2(cos({}), sin({}));\n'.format(
-                i, timest, timest)
-        function += '\n'
-
-    if fit_opts.denom_degree:
-        p_num, p_denom = split_params(coeffs.T, fit_opts)
-        function += glslify_base(p_num, fit_opts, 'n')
-        function += glslify_base(p_denom, fit_opts, 'd')
-        if fit_opts.fit_type == 'fourier':
-            function += '    return n/d;\n\n'
-        else:
-            function += '    return num/denom;\n\n'
-    else:
-        function += glslify_base(coeffs.T, fit_opts, 'p')
-            
-    function += '}\n'
-
-    print(function, file=output_opts.glsl_file)
-
-######################################################################
-
 def glslify(results, fit_opts, output_opts):
+
+    """Get GLSL output for all datasets."""
 
     if output_opts.glsl_file is None:
         return
     
-    for key, _, coeffs in results:
-        glslify_single(key, coeffs, fit_opts, output_opts)
+    for name, _, coeffs in results:
+
+        nchannels = coeffs.shape[0]
+
+        function = '{} {}(float t) {{\n\n'.format(get_glsl_type(nchannels), name)
+
+        max_degree = max(fit_opts.numer_degree, fit_opts.denom_degree)
+
+        if fit_opts.fit_type == 'fourier':
+            function += '    t *= 6.283185307179586;\n\n'
+            for i in range(1, max_degree+1):
+                if i == 1:
+                    timest = 't'
+                else:
+                    timest = '{}.0*t'.format(i)
+                function += '    vec2 cs{} = vec2(cos({}), sin({}));\n'.format(
+                    i, timest, timest)
+            function += '\n'
+
+        if fit_opts.denom_degree:
+            coeffs_num, coeffs_denom = split_params(coeffs.T, fit_opts)
+            function += glslify_single(coeffs_num, fit_opts, 'n')
+            function += glslify_single(coeffs_denom, fit_opts, 'd')
+            if fit_opts.fit_type == 'fourier':
+                function += '    return n/d;\n\n'
+            else:
+                function += '    return num/denom;\n\n'
+        else:
+            function += glslify_single(coeffs.T, fit_opts, 'coeffs')
+
+        function += '}\n'
+
+        print(function, file=output_opts.glsl_file)
     
 
 ######################################################################
 
-def plot_single(key, data, coeffs, fit_opts, output_opts):
+def plot_single(dataset_name, data, coeffs, fit_opts, output_opts):
+
+    """Plot a single dataset."""
 
     npoints, nchannels = data.shape
 
@@ -515,8 +693,8 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
         factor = int(np.ceil(output_opts.min_samples / npoints))
         x_fine = np.linspace(x0, x1, npoints*factor+1, endpoint=True)
 
-    bases = get_bases(x, fit_opts)
-    bases_fine = get_bases(x_fine, fit_opts)
+    data_matrices = get_data_matrices(x, fit_opts)
+    data_matrices_fine = get_data_matrices(x_fine, fit_opts)
         
     ym = 0.05 * (y1 - y0)
 
@@ -527,17 +705,17 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
 
     regular_data = (nchannels != 2 or not output_opts.plot_shape)
 
-    for cidx, p in enumerate(coeffs):
+    for cidx, coeffs in enumerate(coeffs):
 
         color = chan_colors[cidx] * 0.75
         
         channel = data[:, cidx]
 
-        px = reconstruct(p, bases, fit_opts)
-        losses.append(loss(p, bases, channel, fit_opts))
+        px = evaluate(coeffs, data_matrices, fit_opts)
+        losses.append(loss(coeffs, data_matrices, channel, fit_opts))
 
         if x_fine is not x:
-            px_fine = reconstruct(p, bases_fine, fit_opts)
+            px_fine = evaluate(coeffs, data_matrices_fine, fit_opts)
         else:
             px_fine = px
 
@@ -571,12 +749,12 @@ def plot_single(key, data, coeffs, fit_opts, output_opts):
         va = 'top'
         effects=None
 
-    loss_name = LOSS_NAMES[fit_opts.loss]
+    loss_name = _LOSS_NAMES[fit_opts.loss]
     losses = np.array(losses)
     #with np.printoptions(formatter={'all':lambda x: '{:.3g}'.format(x)}) as opts:
     lstr = np.array2string(losses, formatter=dict(all=lambda x:'{:.3g}'.format(x)), separator=', ')
     plt.text(tx, ty, '{}: per-channel {}={}, total={:.3g}'.format(
-        key, loss_name, lstr, losses.sum()),
+        dataset_name, loss_name, lstr, losses.sum()),
              ha=ha, va=va, path_effects=effects)
 
 ######################################################################    
@@ -595,9 +773,9 @@ def plot(results, fit_opts, output_opts):
     
     plt.suptitle(output_opts.plot_title)
 
-    for i, (key, mapdata, coeffs) in enumerate(results):
+    for i, (dataset_name, mapdata, coeffs) in enumerate(results):
         plt.subplot(rows, cols, i+1)
-        plot_single(key, mapdata, coeffs, fit_opts, output_opts)
+        plot_single(dataset_name, mapdata, coeffs, fit_opts, output_opts)
 
     if output_opts.image_filename is None:
         plt.show()
@@ -629,28 +807,28 @@ def parse_cmdline():
 
     parser.add_argument('-t', dest='fit_type',
                         choices=['fourier', 'poly'],
-                        default=DEFAULT_FIT_OPTIONS.fit_type,
+                        default=_DEFAULT_FIT_OPTIONS.fit_type,
                         help='type of fit')
 
     parser.add_argument('-n', dest='numer_degree',
                         metavar='N',
-                        type=int, default=DEFAULT_FIT_OPTIONS.numer_degree,
+                        type=int, default=_DEFAULT_FIT_OPTIONS.numer_degree,
                         help='degree of numerator')
 
     parser.add_argument('-d', dest='denom_degree',
                         metavar='N',
-                        type=int, default=DEFAULT_FIT_OPTIONS.denom_degree,
+                        type=int, default=_DEFAULT_FIT_OPTIONS.denom_degree,
                         help='degree of denominator')
     
-    parser.add_argument('-c', dest='clip_reconstruction',
+    parser.add_argument('-c', dest='clip_output',
                         metavar='Y0,Y1',
                         type=domain_range,
-                        default=DEFAULT_FIT_OPTIONS.clip_reconstruction,
-                        help='data clipping limits (default: none)')
+                        default=_DEFAULT_FIT_OPTIONS.clip_output,
+                        help='output data clipping limits (default: none)')
 
     parser.add_argument('-l', dest='loss',
                         choices=('minimax', 'rmse'),
-                        default=DEFAULT_FIT_OPTIONS.loss,
+                        default=_DEFAULT_FIT_OPTIONS.loss,
                         help='loss function')
 
     parser.add_argument('-g', dest='glsl_filename',
@@ -664,26 +842,26 @@ def parse_cmdline():
     
     parser.add_argument('-T', dest='plot_title',
                         metavar='TITLESTRING',
-                        default=DEFAULT_OUTPUT_OPTIONS.plot_title,
+                        default=_DEFAULT_OUTPUT_OPTIONS.plot_title,
                         help='title for plots')
 
     parser.add_argument('-p', dest='image_filename',
-                        default=DEFAULT_OUTPUT_OPTIONS.image_filename,
+                        default=_DEFAULT_OUTPUT_OPTIONS.image_filename,
                         help='image filename or - to suppress plotting')
     
     parser.add_argument('-x', dest='domain',
-                        metavar='X0,X1', default=DEFAULT_OUTPUT_OPTIONS.domain,
+                        metavar='X0,X1', default=_DEFAULT_OUTPUT_OPTIONS.domain,
                         type=domain_range, help='domain for plotting')
 
     parser.add_argument('-y', dest='range',
-                        metavar='Y0,Y1', default=DEFAULT_OUTPUT_OPTIONS.range,
+                        metavar='Y0,Y1', default=_DEFAULT_OUTPUT_OPTIONS.range,
                         type=domain_range, help='range for plotting')
     
     parser.add_argument('-m', dest='min_samples',
-                        metavar='N', default=DEFAULT_OUTPUT_OPTIONS.min_samples,
+                        metavar='N', default=_DEFAULT_OUTPUT_OPTIONS.min_samples,
                         type=int, help='min number of points in domain for plotting')
 
-    assert not DEFAULT_OUTPUT_OPTIONS.plot_shape
+    assert not _DEFAULT_OUTPUT_OPTIONS.plot_shape
 
     parser.add_argument('-s', dest='plot_shape',
                         action='store_true',
@@ -708,9 +886,9 @@ def parse_cmdline():
         else:
             opts.plot_title = 'Order {}{} Fourier series'.format(
                 fit_opts.numer_degree, rlabel)
-        if fit_opts.clip_reconstruction is not None:
+        if fit_opts.clip_output is not None:
             opts.plot_title += ' clipped to [{:g},{:g}]'.format(
-                *fit_opts.clip_reconstruction)
+                *fit_opts.clip_output)
         _, total_coeffs = count_coeffs(fit_opts)
         opts.plot_title += ' ({} coefficients per channel)'.format(total_coeffs)
 
@@ -735,11 +913,13 @@ def parse_cmdline():
 
 def main():
 
+    """Our main function."""
+
     mapfiles, fit_opts, output_opts = parse_cmdline()
 
     print('Fit options:\n', file=output_opts.console_file)
-    for key, val in fit_opts._asdict().items():
-        print('  {:20} {}'.format(key+':', val),
+    for dataset_name, val in fit_opts._asdict().items():
+        print('  {:20} {}'.format(dataset_name+':', val),
               file=output_opts.console_file)
     print(file=output_opts.console_file)
 
@@ -749,12 +929,12 @@ def main():
         datafilename = 'data/' + filename + '.txt'
         if not os.path.exists(filename) and os.path.exists(datafilename):
             filename = datafilename
-        key, _ = os.path.splitext(os.path.basename(filename))
+        dataset_name, _ = os.path.splitext(os.path.basename(filename))
         mapdata = np.genfromtxt(filename)
         if len(mapdata.shape) == 1:
             mapdata = mapdata.reshape(-1, 1)
-        coeffs = fit(key, mapdata, fit_opts, output_opts)
-        results.append((key, mapdata, coeffs))
+        coeffs = fit(dataset_name, mapdata, fit_opts, output_opts)
+        results.append((dataset_name, mapdata, coeffs))
 
     glslify(results, fit_opts, output_opts)
 
