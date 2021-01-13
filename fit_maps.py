@@ -394,9 +394,9 @@ def fit_single_channel(cidx, x, y, fit_opts, output_opts):
 
         # NOTE: had some issues with singularities, so was messing around with this
         # not sure if needed? -MZ 1/13/21
-        #lambda_I = 1e-8 * np.eye(total_coeffs)
+        lambda_I = 1e-8 * np.eye(total_coeffs)
 
-        G = np.dot(A.T, A) # + lambda_I
+        G = np.dot(A.T, A) + lambda_I
         a = np.dot(A.T, b)
 
         step = 0.025
