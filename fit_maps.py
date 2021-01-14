@@ -402,7 +402,6 @@ def fit_single_channel(cidx, x, y, fit_opts, output_opts):
         step = 0.025
         epsrng = np.arange(step, 1, step)
         #epsrng = 1 - np.exp(-np.arange(1, 10))
-        all_eps = []
 
         for eps in epsrng:
 
@@ -414,64 +413,61 @@ def fit_single_channel(cidx, x, y, fit_opts, output_opts):
             #print('denominator:', denom.min(), denom.max())
 
             all_init_coeffs.append(init_coeffs)
-            all_eps.append(eps)
 
     all_init_coeffs_loss = np.array([loss(init_coeffs, *args) for init_coeffs in all_init_coeffs])
 
     best_idx = all_init_coeffs_loss.argmin()
 
     best_init_coeffs = all_init_coeffs[best_idx]
-    best_e0 = all_init_coeffs_loss[best_idx]
+    best_init_loss = all_init_coeffs_loss[best_idx]
 
     #all_init_coeffs = all_init_coeffs[best_idx:best_idx+1]
 
-    best_p1 = None
-    best_e1 = None
+    best_final_coeffs = None
+    best_final_loss = None
 
-    for init_coeffs in all_init_coeffs:
+    for init_loss, init_coeffs in zip(all_init_coeffs_loss, all_init_coeffs):
 
-        e0 = loss(init_coeffs, *args)
-
-        p1 = init_coeffs
-        e1 = e0
+        final_coeffs = init_coeffs
+        final_loss = init_loss
 
         if (fit_opts.loss == 'minimax' or fit_opts.denom_degree) :
 
-            p1 = init_coeffs.copy()
+            final_coeffs = init_coeffs.copy()
 
             if fit_opts.denom_degree:
                 # step 2/3: local search to do least-squares fit for rational
                 # polynomial or Fourier series, using output of step 1 as
                 # initial guess.
-                res = scipy.optimize.least_squares(residual, p1,
+                res = scipy.optimize.least_squares(residual, final_coeffs,
                                                    ftol=1e-5, xtol=1e-5,
                                                    method='dogbox', args=args)
-                p1 = res.x
+                final_coeffs = res.x
 
             if fit_opts.loss == 'minimax':
                 # step 3/3: local search to do minimax optimization, starting from
                 # output of step 1 or 2. 
-                res = scipy.optimize.minimize(loss, p1,
+                res = scipy.optimize.minimize(loss, final_coeffs,
                                               method='Nelder-Mead',
                                               args=args)
-                p1 = res.x
+                final_coeffs = res.x
 
-            e1 = loss(p1, *args)
+            final_loss = loss(final_coeffs, *args)
 
-        updated = (best_e1 is None or e1 < best_e1)
+        updated = (best_final_loss is None or final_loss < best_final_loss)
 
         if updated:
-            best_e1 = e1
-            best_p1 = p1
+            best_final_loss = final_loss
+            best_final_coeffs = final_coeffs
             updated = True
             
         print('  - channel {} {}: {:.7f} -> {:.7f} ({:6.2f}%){}'.format(
-            cidx, loss_name, best_e0, e1, 100.0*e1/best_e0, ' *** new min ***' if updated else ''),
+            cidx, loss_name, init_loss, final_loss, 100.0*final_loss/init_loss, ' *** new min ***' if updated else ''),
               file=output_opts.console_file)
 
     print(file=output_opts.console_file)
     
-    return best_p1
+    return best_final_coeffs
 
 ######################################################################
 
