@@ -7,7 +7,9 @@ from PIL import Image
 
 
 import skimage.measure
+import skimage.filters
 
+BLUR_SIGMA = 1.5
 
 NUM_POINTS_OUT = 256
 
@@ -260,8 +262,14 @@ def main():
         # make room for border
         enlarged = np.empty((h+2, w+2), dtype=np.uint8)
 
+        image = np.array(image)
+
+        if BLUR_SIGMA:
+            image = skimage.filters.gaussian(image, sigma=BLUR_SIGMA, mode='constant', cval=image[0,0])
+            image = np.clip(image*255, 0, 255).astype(np.uint8)
+
         # top left pixel from orig image becomes background color
-        enlarged[:] = np.array(image)[0, 0]
+        enlarged[:] = image[0,0]
 
         # copy rest of image in
         enlarged[1:h+1, 1:w+1] = image
