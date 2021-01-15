@@ -717,9 +717,22 @@ def plot_single(dataset_name, data, coeffs, fit_opts, output_opts):
 
         reconstructions.append(px_fine)
 
+
         if regular_data:
             plt.plot(x, channel, color=color)
             plt.plot(x_fine, px_fine, ':', color=0.5*color, linewidth=2)
+
+            '''
+            y = evaluate(coeffs, data_matrices, fit_opts)
+            err = np.abs(y - channel)
+
+            imax = err.argmax()
+            ex = x[imax]
+            ey = 0.5*(y[imax] + channel[imax])
+            
+            plt.plot(ex, ey, 'ro', markerfacecolor='none')
+            plt.text(ex, ey, 'max err={:.3g}'.format(err[imax]), ha='center', va='top')
+            '''
         
     if regular_data:
         plt.xlim(x0-xm, x1+xm)
