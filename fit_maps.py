@@ -308,6 +308,7 @@ def fit_single_channel(cidx, x, y, fit_opts, output_opts):
         
         # can skip this step if not rational
         all_init_coeffs = [init_coeffs]
+        all_eps = [None]
         
     else:
 
@@ -316,6 +317,7 @@ def fit_single_channel(cidx, x, y, fit_opts, output_opts):
         
         init_coeffs = np.hstack([init_coeffs, np.zeros(num_denom_coeffs, dtype=init_coeffs.dtype)])
         all_init_coeffs = [init_coeffs]
+        all_eps = [None]
 
         if fit_opts.fit_type == 'poly':
             assert len(numer_data_matrix.shape) == 1
@@ -411,7 +413,8 @@ def fit_single_channel(cidx, x, y, fit_opts, output_opts):
 
             denom = np.dot(C, init_coeffs) + 1
             #print('denominator:', denom.min(), denom.max())
-
+            
+            all_eps.append(eps)
             all_init_coeffs.append(init_coeffs)
 
     all_init_coeffs_loss = np.array([loss(init_coeffs, *args) for init_coeffs in all_init_coeffs])
@@ -426,7 +429,7 @@ def fit_single_channel(cidx, x, y, fit_opts, output_opts):
     best_final_coeffs = None
     best_final_loss = None
 
-    for init_loss, init_coeffs in zip(all_init_coeffs_loss, all_init_coeffs):
+    for eps, init_loss, init_coeffs in zip(all_eps, all_init_coeffs_loss, all_init_coeffs):
 
         final_coeffs = init_coeffs
         final_loss = init_loss
@@ -460,9 +463,14 @@ def fit_single_channel(cidx, x, y, fit_opts, output_opts):
             best_final_loss = final_loss
             best_final_coeffs = final_coeffs
             updated = True
+
+        if eps is None:
+            epstr = 'None '
+        else:
+            epstr = '{:5.3f}'.format(eps)
             
-        print('  - channel {} {}: {:.7f} -> {:.7f} ({:6.2f}%){}'.format(
-            cidx, loss_name, init_loss, final_loss, 100.0*final_loss/init_loss, ' *** new min ***' if updated else ''),
+        print('  - channel {} {} (eps={:}): {:.7f} -> {:.7f} ({:6.2f}%){}'.format(
+            cidx, loss_name, epstr, init_loss, final_loss, 100.0*final_loss/init_loss, ' *** new min ***' if updated else ''),
               file=output_opts.console_file)
 
     print(file=output_opts.console_file)
