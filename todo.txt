@@ -1,0 +1,27 @@
+  - Why does minimax look worse than rmse for rat-05 with 64 params?
+    - probably because minimax is dumb when run per-channel?
+
+Key research questions
+
+  - compare this approach to 
+
+    - just fit a non-rational polymial with same # of coeff
+      (is rational function always better?)
+
+    - rational least-squares fitting (like fit_viridis_leastsq)
+      without QP (probably see lots of roots in denominator)
+
+    - just QP without subsequent least squares 
+
+    - scipy's "global optimizers"
+
+
+  - try RANSAC
+
+Other things to try:
+
+  - relax from L2 to inf norm when moving to minimax?
+  - greedily increase denominator degree one at a time?
+  - what least_squares method ('tr', 'lm', 'dogbox') is best?
+  - what minimize method is best ('Nelder-Mead', 'BFGS', etc.)?
+  - do optimization across multiple channels?
