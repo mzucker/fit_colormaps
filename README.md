@@ -12,6 +12,8 @@ do a normal polynomial/Fourier series, optionally.
 I may have invented (re-discovered?) the idea of rational Fourier series. The only source 
 I've found so far is <https://apps.dtic.mil/dtic/tr/fulltext/u2/a273660.pdf>.
 
+Also a source on fitting rational functions from NIST: <https://www.itl.nist.gov/div898/handbook/pmd/section8/pmd812.htm>
+
 Here's how fitting works:
 
   1. Global least-squares fit to non-rational polynomial or Fourier series. 
