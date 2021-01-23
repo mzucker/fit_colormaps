@@ -59,7 +59,7 @@ _DEFAULT_FIT_OPTIONS = FitOptions(fit_type='poly',
                                   numer_degree=4,
                                   denom_degree=0,
                                   clip_output=None,
-                                  loss='minimax')
+                                  loss='rmse')
 
 _DEFAULT_OUTPUT_OPTIONS = OutputOptions(console_file=None,
                                         glsl_file=None,
